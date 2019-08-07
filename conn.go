@@ -153,23 +153,24 @@ func (c *Conn) Connect() (*IdentifyResponse, error) {
 	c.r = conn
 	c.w = conn
 
-	_, err = c.Write(MagicV2)
+	_, err = c.Write(MagicV2) //建立连接后就发送MagicV2，下面不等返回就又发送“IDENTIFY”命令，会等待返回
 	if err != nil {
 		c.Close()
 		return nil, fmt.Errorf("[%s] failed to write magic - %s", c.addr, err)
 	}
 
-	resp, err := c.identify()
+	resp, err := c.identify()//
 	if err != nil {
 		return nil, err
 	}
 
-	if resp != nil && resp.AuthRequired {
+	if resp != nil && resp.AuthRequired { //检查服务端是否要求发送请求是否需要授权
 		if c.config.AuthSecret == "" {
 			c.log(LogLevelError, "Auth Required")
 			return nil, errors.New("Auth Required")
 		}
-		err := c.auth(c.config.AuthSecret)
+		//如果IDENTIFY响应中有auth_required=true，客户端必须在 SUB, PUB 或 MPUB 命令前前发送 AUTH 。否则，客户端不需要认证。
+		err := c.auth(c.config.AuthSecret)//发送授权命令
 		if err != nil {
 			c.log(LogLevelError, "Auth Failed %s", err)
 			return nil, err
@@ -296,10 +297,10 @@ func (c *Conn) identify() (*IdentifyResponse, error) {
 	ci["user_agent"] = c.config.UserAgent
 	ci["short_id"] = c.config.ClientID // deprecated
 	ci["long_id"] = c.config.Hostname  // deprecated
-	ci["tls_v1"] = c.config.TlsV1
+	ci["tls_v1"] = c.config.TlsV1 //允许 TLS 来连接
 	ci["deflate"] = c.config.Deflate
 	ci["deflate_level"] = c.config.DeflateLevel
-	ci["snappy"] = c.config.Snappy
+	ci["snappy"] = c.config.Snappy //允许 snappy 压缩这次连接
 	ci["feature_negotiation"] = true
 	if c.config.HeartbeatInterval == -1 {
 		ci["heartbeat_interval"] = -1
@@ -307,11 +308,11 @@ func (c *Conn) identify() (*IdentifyResponse, error) {
 		ci["heartbeat_interval"] = int64(c.config.HeartbeatInterval / time.Millisecond)
 	}
 	ci["sample_rate"] = c.config.SampleRate
-	ci["output_buffer_size"] = c.config.OutputBufferSize
+	ci["output_buffer_size"] = c.config.OutputBufferSize // 当 nsqd 写到这个客户端时将会用到的缓存的大小（字节数）
 	if c.config.OutputBufferTimeout == -1 {
 		ci["output_buffer_timeout"] = -1
 	} else {
-		ci["output_buffer_timeout"] = int64(c.config.OutputBufferTimeout / time.Millisecond)
+		ci["output_buffer_timeout"] = int64(c.config.OutputBufferTimeout / time.Millisecond) //超时后，nsqd 缓冲的数据都会刷新到此客户端。
 	}
 	ci["msg_timeout"] = int64(c.config.MsgTimeout / time.Millisecond)
 	cmd, err := Identify(ci)

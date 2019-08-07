@@ -119,7 +119,7 @@ type Consumer struct {
 	rdyRetryTimers map[string]*time.Timer
 
 	pendingConnections map[string]*Conn
-	connections        map[string]*Conn
+	connections        map[string]*Conn //“ip:port”为key,value为连接套接字为Conn
 
 	nsqdTCPAddrs []string
 
@@ -579,7 +579,7 @@ func (r *Consumer) ConnectToNSQD(addr string) error {
 	r.mtx.Unlock()
 
 	// pre-emptive signal to existing connections to lower their RDY count
-	for _, c := range r.conns() {
+	for _, c := range r.conns() { //会遍历这个Consumer的所有nsqd conn（Consumer可以同时连接多个nsqd），然后调用	maybeUpdateRDY 这个方法
 		r.maybeUpdateRDY(c)
 	}
 

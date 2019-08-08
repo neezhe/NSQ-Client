@@ -47,7 +47,7 @@ type msgResponse struct {
 //
 // Conn exposes a set of callbacks for the
 // various events that occur on a connection
-type Conn struct {
+type Conn struct { //全部是私有变量
 	// 64bit atomic vars need to be first for proper alignment on 32bit platforms
 	messagesInFlight int64
 	maxRdyCount      int64
@@ -91,18 +91,18 @@ func NewConn(addr string, config *Config, delegate ConnDelegate) *Conn {
 		panic("Config must be created with NewConfig()")
 	}
 	return &Conn{
-		addr: addr,
+		addr: addr, //服务器地址
 
-		config:   config,
-		delegate: delegate,
+		config:   config, //基本的服务端配置
+		delegate: delegate, //producer 与 consumer 用来处理消息回调的接口
 
-		maxRdyCount:      2500,
-		lastMsgTimestamp: time.Now().UnixNano(),
+		maxRdyCount:      2500, //并发控制数量
+		lastMsgTimestamp: time.Now().UnixNano(), //上一条消息抵达的时间
 
-		cmdChan:         make(chan *Command),
-		msgResponseChan: make(chan *msgResponse),
-		exitChan:        make(chan int),
-		drainReady:      make(chan int),
+		cmdChan:         make(chan *Command), //与服务器的 cmd 管道
+		msgResponseChan: make(chan *msgResponse), //消息回应管道
+		exitChan:        make(chan int), //退出信号
+		drainReady:      make(chan int),  //中断信号
 	}
 }
 
@@ -159,7 +159,7 @@ func (c *Conn) Connect() (*IdentifyResponse, error) {
 		return nil, fmt.Errorf("[%s] failed to write magic - %s", c.addr, err)
 	}
 
-	resp, err := c.identify()//
+	resp, err := c.identify()//告诉服务器自己这边的一些配置,如 clientid, hostname, 心跳间隔时长，超时时长等一些配置信息
 	if err != nil {
 		return nil, err
 	}
@@ -179,6 +179,7 @@ func (c *Conn) Connect() (*IdentifyResponse, error) {
 
 	c.wg.Add(2)
 	atomic.StoreInt32(&c.readLoopRunning, 1)
+	//以下与服务端进行通信
 	go c.readLoop()
 	go c.writeLoop()
 	return resp, nil
@@ -481,7 +482,7 @@ func (c *Conn) auth(secret string) error {
 }
 
 func (c *Conn) readLoop() {
-	delegate := &connMessageDelegate{c}
+	delegate := &connMessageDelegate{c} //是Conn的代理
 	for {
 		if atomic.LoadInt32(&c.closeFlag) == 1 {
 			goto exit
@@ -502,7 +503,7 @@ func (c *Conn) readLoop() {
 		if frameType == FrameTypeResponse && bytes.Equal(data, []byte("_heartbeat_")) {
 			c.log(LogLevelDebug, "heartbeat received")
 			c.delegate.OnHeartbeat(c)
-			err := c.WriteCommand(Nop())
+			err := c.WriteCommand(Nop()) //消息是 heartbeat 会回复一条空指令告诉服务器自己的存活状态
 			if err != nil {
 				c.log(LogLevelError, "IO error - %s", err)
 				c.delegate.OnIOError(c, err)
@@ -527,7 +528,7 @@ func (c *Conn) readLoop() {
 			atomic.AddInt64(&c.messagesInFlight, 1)
 			atomic.StoreInt64(&c.lastMsgTimestamp, time.Now().UnixNano())
 
-			c.delegate.OnMessage(c, msg)
+			c.delegate.OnMessage(c, msg) //读到消息，其实调用的就是consumer的onConnMessage函数，把 message 发送到 incomingMessages 管道里面
 		case FrameTypeError:
 			c.log(LogLevelError, "protocol error - %s", data)
 			c.delegate.OnError(c, data)
@@ -552,7 +553,13 @@ exit:
 	c.wg.Done()
 	c.log(LogLevelInfo, "readLoop exiting")
 }
-
+//writeloop 主要关心的是发送 cmd 指令，和回复消息处理的状态
+//在 nsq 客户端中一个消息的处理状态有四种。分别是：
+//1.FIN 处理成功，告诉服务端可以放心的丢弃掉这条消息。
+//2.REQ 处理失败，告诉服务端这条消息需要重新入队。
+//3.TOUCH 告诉服务端需要更多的时间处理这条消息。
+//4.消息处理超时，服务端会根据消息处理时长判断消息是否需要重新入队。
+//这里为了消息处理更高效，使用了一个单独的 channel 发送 FIN 和 REQ 状态指令。
 func (c *Conn) writeLoop() {
 	for {
 		select {

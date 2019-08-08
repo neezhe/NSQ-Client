@@ -184,7 +184,7 @@ func NewConsumer(topic string, channel string, config *Config) (*Consumer, error
 		exitChan: make(chan int),
 	}
 	r.wg.Add(1)
-	go r.rdyLoop()
+	go r.rdyLoop()//定时更新RDY的值，它是用来控制服务端向客户端推送的消息的数量的。
 	return r, nil
 }
 
@@ -524,8 +524,10 @@ func (r *Consumer) ConnectToNSQD(addr string) error {
 	atomic.StoreInt32(&r.connectedFlag, 1)
 
 	logger, logLvl := r.getLogger()
-
-	conn := NewConn(addr, &r.config, &consumerConnDelegate{r})
+	// go-nsq/conn.go是对底层连接的一个抽象，他是不关心你是生产者还是消费者，这里使用到了代理模式
+	//consumerConnDelegate这个结构体的目的就是把consumer的那一套私有方法暴露出来。Delegate就是委托代表的意思，此处是consumer的委托。
+	//此处表明，我第3个参数要开始代理你这个消费者了。
+	conn := NewConn(addr, &r.config, &consumerConnDelegate{r}) //producer与consumer会在调用 NewConn函数时传入一个自己的delegate用来给connection模块回调处理消息
 	conn.SetLogger(logger, logLvl,
 		fmt.Sprintf("%3d [%s/%s] (%%s)", r.id, r.topic, r.channel))
 
@@ -551,7 +553,7 @@ func (r *Consumer) ConnectToNSQD(addr string) error {
 		conn.Close()
 	}
 
-	resp, err := conn.Connect()
+	resp, err := conn.Connect() //producer 和 consumer 会调用 Connect() 函数与 nsq 建立连接
 	if err != nil {
 		cleanupConnection()
 		return err
@@ -643,7 +645,7 @@ func (r *Consumer) DisconnectFromNSQLookupd(addr string) error {
 
 func (r *Consumer) onConnMessage(c *Conn, msg *Message) {
 	atomic.AddUint64(&r.messagesReceived, 1)
-	r.incomingMessages <- msg
+	r.incomingMessages <- msg //把 message发送到incomingMessages管道里面
 }
 
 func (r *Consumer) onConnMessageFinished(c *Conn, msg *Message) {
@@ -887,7 +889,7 @@ func (r *Consumer) rdyLoop() {
 	for {
 		select {
 		case <-redistributeTicker.C:
-			r.redistributeRDY()
+			r.redistributeRDY() //根据默认配置中的参数，定时发送RDY命令
 		case <-r.exitChan:
 			goto exit
 		}
@@ -1085,7 +1087,7 @@ func (r *Consumer) AddConcurrentHandlers(handler Handler, concurrency int) {
 
 	atomic.AddInt32(&r.runningHandlers, int32(concurrency))
 	for i := 0; i < concurrency; i++ {
-		go r.handlerLoop(handler)
+		go r.handlerLoop(handler) //里面是个死循环。consumer模块内，有一个 handleloop不断轮询incomingMessages管道来接收connection模块发过来的消息。
 	}
 }
 
@@ -1093,17 +1095,17 @@ func (r *Consumer) handlerLoop(handler Handler) {
 	r.log(LogLevelDebug, "starting Handler")
 
 	for {
-		message, ok := <-r.incomingMessages
+		message, ok := <-r.incomingMessages //会阻塞,不断轮询 incomingMessages 管道来接收 connection 模块发过来的消息。
 		if !ok {
 			goto exit
 		}
 
 		if r.shouldFailMessage(message, handler) {
-			message.Finish()
+			message.Finish() //发送这个消息的FINISH命令
 			continue
 		}
 
-		err := handler.HandleMessage(message)
+		err := handler.HandleMessage(message) //调用之前注册的handler
 		if err != nil {
 			r.log(LogLevelError, "Handler returned error (%s) for msg %s", err, message.ID)
 			if !message.IsAutoResponseDisabled() {
@@ -1130,7 +1132,7 @@ func (r *Consumer) shouldFailMessage(message *Message, handler interface{}) bool
 		r.log(LogLevelWarning, "msg %s attempted %d times, giving up",
 			message.ID, message.Attempts)
 
-		logger, ok := handler.(FailedMessageLogger)
+		logger, ok := handler.(FailedMessageLogger) //卧槽，interface可以和interface转化？
 		if ok {
 			logger.LogFailedMessage(message)
 		}

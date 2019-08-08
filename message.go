@@ -20,7 +20,7 @@ type Message struct {
 	ID        MessageID
 	Body      []byte
 	Timestamp int64
-	Attempts  uint16
+	Attempts  uint16 //这个消息的尝试次数
 
 	NSQDAddress string
 

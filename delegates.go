@@ -58,7 +58,8 @@ func (d *connMessageDelegate) OnTouch(m *Message) { d.c.onMessageTouch(m) }
 
 // ConnDelegate is an interface of methods that are used as
 // callbacks in Conn
-type ConnDelegate interface {
+//这里面表示被代理的对象所有暴露出来的接口。被代理的消费者，被代理的生产者，都用这个代理提供的接口。
+type ConnDelegate interface { //点击左边的图标，发现此接口在两个type被实现：consumerConnDelegate/producerConnDelegate
 	// OnResponse is called when the connection
 	// receives a FrameTypeResponse from nsqd
 	OnResponse(*Conn, []byte)

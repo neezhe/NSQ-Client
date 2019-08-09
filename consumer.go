@@ -1132,7 +1132,7 @@ func (r *Consumer) shouldFailMessage(message *Message, handler interface{}) bool
 		r.log(LogLevelWarning, "msg %s attempted %d times, giving up",
 			message.ID, message.Attempts)
 
-		logger, ok := handler.(FailedMessageLogger) //卧槽，interface可以和interface转化？
+		logger, ok := handler.(FailedMessageLogger) //此处只是通过ok来判断handler是否是FailedMessageLogger类型的接口对象，若是则为true
 		if ok {
 			logger.LogFailedMessage(message)
 		}

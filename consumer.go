@@ -69,7 +69,7 @@ var instCount int64
 type backoffSignal int
 
 const (
-	backoffFlag backoffSignal = iota
+	backoffFlag  backoffSignal = iota
 	continueFlag
 	resumeFlag
 )
@@ -85,13 +85,13 @@ const (
 // reconnection) to any discovered nsqds.
 type Consumer struct {
 	// 64bit atomic vars need to be first for proper alignment on 32bit platforms
-	messagesReceived uint64
-	messagesFinished uint64
-	messagesRequeued uint64
-	totalRdyCount    int64
+	messagesReceived uint64 //来一个消息就加1一次
+	messagesFinished uint64 //返回一次FIN命令此处就加1
+	messagesRequeued uint64 //消息重新入队就加1
+	totalRdyCount    int64 //用来计算可接收消息数量,它永远不会大于 maxInFlight，每当收到一个消息后会对其减 1。maxrdycount表示客户端的最大rdy数
 	backoffDuration  int64
 	backoffCounter   int32
-	maxInFlight      int32
+	maxInFlight      int32 //用来标识一次可接受的最大消息数量
 
 	mtx sync.RWMutex
 
@@ -119,7 +119,7 @@ type Consumer struct {
 	rdyRetryTimers map[string]*time.Timer
 
 	pendingConnections map[string]*Conn
-	connections        map[string]*Conn //“ip:port”为key,value为连接套接字为Conn
+	connections        map[string]*Conn //“nsqd的ip:port”为key,value为连接套接字为Conn
 
 	nsqdTCPAddrs []string
 
@@ -168,7 +168,7 @@ func NewConsumer(topic string, channel string, config *Config) (*Consumer, error
 
 		logger:      log.New(os.Stderr, "", log.Flags()),
 		logLvl:      LogLevelInfo,
-		maxInFlight: int32(config.MaxInFlight),
+		maxInFlight: int32(config.MaxInFlight), //用来标识可以处理的最大消息数量
 
 		incomingMessages: make(chan *Message),
 
@@ -184,7 +184,7 @@ func NewConsumer(topic string, channel string, config *Config) (*Consumer, error
 		exitChan: make(chan int),
 	}
 	r.wg.Add(1)
-	go r.rdyLoop()//定时更新RDY的值，它是用来控制服务端向客户端推送的消息的数量的。
+	go r.rdyLoop() //定时更新RDY的值，它是用来控制服务端向客户端推送的消息的数量的。
 	return r, nil
 }
 
@@ -256,7 +256,7 @@ func (r *Consumer) SetBehaviorDelegate(cb interface{}) {
 // is responsible for.
 func (r *Consumer) perConnMaxInFlight() int64 {
 	b := float64(r.getMaxInFlight())
-	s := b / float64(len(r.conns()))
+	s := b / float64(len(r.conns())) //能处理消息的最大数量平均到每个连接上的数量
 	return int64(math.Min(math.Max(1, s), b))
 }
 
@@ -291,7 +291,7 @@ func (r *Consumer) ChangeMaxInFlight(maxInFlight int) {
 	atomic.StoreInt32(&r.maxInFlight, int32(maxInFlight))
 
 	for _, c := range r.conns() {
-		r.maybeUpdateRDY(c)
+		r.maybeUpdateRDY(c) //这表示每当处理一条消息，都有可能重新进行并发控制计算。
 	}
 }
 
@@ -330,7 +330,7 @@ func (r *Consumer) ConnectToNSQLookupd(addr string) error {
 	if numLookupd == 1 {
 		r.queryLookupd()
 		r.wg.Add(1)
-		go r.lookupdLoop()
+		go r.lookupdLoop() //开启程进行搜索生产者
 	}
 
 	return nil
@@ -513,15 +513,17 @@ func (r *Consumer) ConnectToNSQDs(addresses []string) error {
 // automatically.  This method is useful when you want to connect to a single, local,
 // instance.
 func (r *Consumer) ConnectToNSQD(addr string) error {
+	//consumer和producer在调用Stop函数的时候会设置此标志位
 	if atomic.LoadInt32(&r.stopFlag) == 1 {
 		return errors.New("consumer stopped")
 	}
-
+	//检查有多少个处理函数协程在跑（只要接受的incomingMessages channel不被关闭，处理函数是不会退出for循环的）
+	//由此if语句可见，消费者在连接到nsqd之前必须要通过AddHandler添加处理函数
 	if atomic.LoadInt32(&r.runningHandlers) == 0 {
 		return errors.New("no handlers")
 	}
 
-	atomic.StoreInt32(&r.connectedFlag, 1)
+	atomic.StoreInt32(&r.connectedFlag, 1) //这玩意表示已经开始发起连接nsqd或者lookupd了，并不代表真的连接上。
 
 	logger, logLvl := r.getLogger()
 	// go-nsq/conn.go是对底层连接的一个抽象，他是不关心你是生产者还是消费者，这里使用到了代理模式
@@ -558,7 +560,6 @@ func (r *Consumer) ConnectToNSQD(addr string) error {
 		cleanupConnection()
 		return err
 	}
-
 	if resp != nil {
 		if resp.MaxRdyCount < int64(r.getMaxInFlight()) {
 			r.log(LogLevelWarning,
@@ -577,12 +578,18 @@ func (r *Consumer) ConnectToNSQD(addr string) error {
 
 	r.mtx.Lock()
 	delete(r.pendingConnections, addr)
-	r.connections[addr] = conn
+	r.connections[addr] = conn //也就是说上面的连接都成功了后，这个conn会被记录到这个connsumer的connections中去。
 	r.mtx.Unlock()
 
 	// pre-emptive signal to existing connections to lower their RDY count
+	//RDY 是 nsqd 推送消息流量控制的核心。会在创建连接时、接受到消息时触发，里面有 3 个情况会发送 RDY 指令。
+	//1.剩余量太少
+	//2.消费得很快
+	//3.超量了
 	for _, c := range r.conns() { //会遍历这个Consumer的所有nsqd conn（Consumer可以同时连接多个nsqd），然后调用	maybeUpdateRDY 这个方法
-		r.maybeUpdateRDY(c)
+		//当客户端连接到 nsqd 和并订阅到一个通道时，它被放置在一个 RDY 为 0 状态。这意味着，还没有信息被发送到客户端。
+		// 当客户端已准备好接收消息发送，更新它的命令 RDY 状态到它准备处理的数量，比如 100。无需任何额外的指令，当 100 条消息可用时，将被传递到客户端
+		r.maybeUpdateRDY(c) //这表示每当处理一条消息或者建立一个连接，都有可能重新进行并发控制计算。重新均衡分配，最理想的情况是 MaxInFlight / len(conns)
 	}
 
 	return nil
@@ -888,8 +895,8 @@ func (r *Consumer) rdyLoop() {
 
 	for {
 		select {
-		case <-redistributeTicker.C:
-			r.redistributeRDY() //根据默认配置中的参数，定时发送RDY命令
+		case <-redistributeTicker.C: //默认 5s
+			r.redistributeRDY()      //根据默认配置中的参数，定时发送RDY命令,用来触发 maybeUpdateRDY 重新均衡分配，最理想的情况是 MaxInFlight / len(conns)。
 		case <-r.exitChan:
 			goto exit
 		}
@@ -952,7 +959,7 @@ func (r *Consumer) sendRDY(c *Conn, count int64) error {
 
 	atomic.AddInt64(&r.totalRdyCount, count-c.RDY())
 	c.SetRDY(count)
-	err := c.WriteCommand(Ready(int(count)))
+	err := c.WriteCommand(Ready(int(count))) //告诉nsqd你可以向我提供count个消息
 	if err != nil {
 		r.log(LogLevelError, "(%s) error sending RDY %d - %s", c.String(), count, err)
 		return err
@@ -990,12 +997,13 @@ func (r *Consumer) redistributeRDY() {
 
 	possibleConns := make([]*Conn, 0, len(conns))
 	for _, c := range conns {
-		lastMsgDuration := time.Now().Sub(c.LastMessageTime())
-		lastRdyDuration := time.Now().Sub(c.LastRdyTime())
+		lastMsgDuration := time.Now().Sub(c.LastMessageTime()) //LastMessageTime 是上一条消息处理前设定的时间
+		lastRdyDuration := time.Now().Sub(c.LastRdyTime())     //lastRdyTimestamp 是这个 connection 上一次调用 SetRdyCount 的时间。
 		rdyCount := c.RDY()
 		r.log(LogLevelDebug, "(%s) rdy: %d (last message received %s)",
 			c.String(), rdyCount, lastMsgDuration)
 		if rdyCount > 0 {
+			//这两个时间的对比主要是为了找出那些处理消息比较慢的连接，尽量让其他的 connection 去接收消息。
 			if lastMsgDuration > r.config.LowRdyIdleTimeout {
 				r.log(LogLevelDebug, "(%s) idle connection, giving up RDY", c.String())
 				r.updateRDY(c, 0)
@@ -1007,12 +1015,12 @@ func (r *Consumer) redistributeRDY() {
 		possibleConns = append(possibleConns, c)
 	}
 
-	availableMaxInFlight := int64(maxInFlight) - atomic.LoadInt64(&r.totalRdyCount)
+	availableMaxInFlight := int64(maxInFlight) - atomic.LoadInt64(&r.totalRdyCount) // //计算空余可以分配的的 RDY 数量
 	if r.inBackoff() {
 		availableMaxInFlight = 1 - atomic.LoadInt64(&r.totalRdyCount)
 	}
 
-	for len(possibleConns) > 0 && availableMaxInFlight > 0 {
+	for len(possibleConns) > 0 && availableMaxInFlight > 0 { //重新随机分配空余的 RDY
 		availableMaxInFlight--
 		r.rngMtx.Lock()
 		i := r.rng.Int() % len(possibleConns)
@@ -1091,12 +1099,14 @@ func (r *Consumer) AddConcurrentHandlers(handler Handler, concurrency int) {
 	}
 }
 
-func (r *Consumer) handlerLoop(handler Handler) {
+func (r *Consumer) handlerLoop(handler Handler) { //这是个协程
 	r.log(LogLevelDebug, "starting Handler")
 
 	for {
+		fmt.Println("=========r========", r)
+
 		message, ok := <-r.incomingMessages //会阻塞,不断轮询 incomingMessages 管道来接收 connection 模块发过来的消息。
-		if !ok {
+		if !ok { //这个channel关闭的时候。由此可见当此协程退出的时候，runningHandlers会自动减1
 			goto exit
 		}
 
@@ -1115,7 +1125,7 @@ func (r *Consumer) handlerLoop(handler Handler) {
 		}
 
 		if !message.IsAutoResponseDisabled() {
-			message.Finish()
+			message.Finish() //完成一条消息
 		}
 	}
 

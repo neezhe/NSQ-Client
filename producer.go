@@ -278,7 +278,7 @@ func (w *Producer) connect() error {
 	w.conn = NewConn(w.addr, &w.config, &producerConnDelegate{w})
 	w.conn.SetLogger(logger, logLvl, fmt.Sprintf("%3d (%%s)", w.id))
 
-	_, err := w.conn.Connect()
+	_, err := w.conn.Connect() //同样的，发送v2协议，identify命令，可能发送AUTH命令
 	if err != nil {
 		w.conn.Close()
 		w.log(LogLevelError, "(%s) error connecting to nsqd - %s", w.addr, err)

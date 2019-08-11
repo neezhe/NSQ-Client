@@ -49,9 +49,9 @@ type msgResponse struct {
 // various events that occur on a connection
 type Conn struct { //全部是私有变量
 	// 64bit atomic vars need to be first for proper alignment on 32bit platforms
-	messagesInFlight int64
-	maxRdyCount      int64
-	rdyCount         int64
+	messagesInFlight int64 //来一个消息就加1，表示正在处理的消息数量
+	maxRdyCount      int64 //当前 connection 可接收的消息数量的最大值
+	rdyCount         int64 //用来标识当前 connection 可接收的消息数量的最大值，如果收到一个消息就对其减 1。
 	lastRdyTimestamp int64
 	lastMsgTimestamp int64
 
@@ -222,13 +222,13 @@ func (c *Conn) SetRDY(rdy int64) {
 // MaxRDY returns the nsqd negotiated maximum
 // RDY count that it will accept for this connection
 func (c *Conn) MaxRDY() int64 {
-	return c.maxRdyCount
+	return c.maxRdyCount //最大的RDY值，就事客户端所能处理的最大消息数
 }
 
 // LastRdyTime returns the time of the last non-zero RDY
 // update for this connection
 func (c *Conn) LastRdyTime() time.Time {
-	return time.Unix(0, atomic.LoadInt64(&c.lastRdyTimestamp))
+	return time.Unix(0, atomic.LoadInt64(&c.lastRdyTimestamp)) //lastRdyTimestamp 是这个 connection 上一次调用 SetRdyCount 的时间。
 }
 
 // LastMessageTime returns a time.Time representing
@@ -341,7 +341,7 @@ func (c *Conn) identify() (*IdentifyResponse, error) {
 		return nil, nil
 	}
 
-	resp := &IdentifyResponse{}
+	resp := &IdentifyResponse{} //
 	err = json.Unmarshal(data, resp)
 	if err != nil {
 		return nil, ErrIdentify{err.Error()}
@@ -349,7 +349,7 @@ func (c *Conn) identify() (*IdentifyResponse, error) {
 
 	c.log(LogLevelDebug, "IDENTIFY response: %+v", resp)
 
-	c.maxRdyCount = resp.MaxRdyCount
+	c.maxRdyCount = resp.MaxRdyCount //客户端会在identify的返回值传入一个 MaxRdyCount，服务端对每个 connection 发送的消息永远不超过这个数字。
 
 	if resp.TLSv1 {
 		c.log(LogLevelInfo, "upgrading to TLS")
@@ -525,7 +525,7 @@ func (c *Conn) readLoop() {
 			msg.Delegate = delegate
 			msg.NSQDAddress = c.String()
 
-			atomic.AddInt64(&c.messagesInFlight, 1)
+			atomic.AddInt64(&c.messagesInFlight, 1) //来一个待压入channel的消息就加1，后面在处理完一个消息后这个变量就会减1
 			atomic.StoreInt64(&c.lastMsgTimestamp, time.Now().UnixNano())
 
 			c.delegate.OnMessage(c, msg) //读到消息，其实调用的就是consumer的onConnMessage函数，把 message 发送到 incomingMessages 管道里面

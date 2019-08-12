@@ -69,7 +69,7 @@ var instCount int64
 type backoffSignal int
 
 const (
-	backoffFlag  backoffSignal = iota
+	backoffFlag backoffSignal = iota
 	continueFlag
 	resumeFlag
 )
@@ -88,7 +88,7 @@ type Consumer struct {
 	messagesReceived uint64 //来一个消息就加1一次
 	messagesFinished uint64 //返回一次FIN命令此处就加1
 	messagesRequeued uint64 //消息重新入队就加1
-	totalRdyCount    int64 //用来计算可接收消息数量,它永远不会大于 maxInFlight，每当收到一个消息后会对其减 1。maxrdycount表示客户端的最大rdy数
+	totalRdyCount    int64  //用来计算可接收消息数量,它永远不会大于 maxInFlight，每当收到一个消息后会对其减 1。maxrdycount表示客户端的最大rdy数
 	backoffDuration  int64
 	backoffCounter   int32
 	maxInFlight      int32 //用来标识一次可接受的最大消息数量
@@ -302,21 +302,21 @@ func (r *Consumer) ChangeMaxInFlight(maxInFlight int) {
 //
 // A goroutine is spawned to handle continual polling.
 func (r *Consumer) ConnectToNSQLookupd(addr string) error {
-	if atomic.LoadInt32(&r.stopFlag) == 1 {
+	if atomic.LoadInt32(&r.stopFlag) == 1 { //判断消费者是否停止
 		return errors.New("consumer stopped")
 	}
-	if atomic.LoadInt32(&r.runningHandlers) == 0 {
+	if atomic.LoadInt32(&r.runningHandlers) == 0 { //这个消费者是否有hanler在工作
 		return errors.New("no handlers")
 	}
 
-	if err := validatedLookupAddr(addr); err != nil {
+	if err := validatedLookupAddr(addr); err != nil { //是否是书写合法的ip地址
 		return err
 	}
 
-	atomic.StoreInt32(&r.connectedFlag, 1)
+	atomic.StoreInt32(&r.connectedFlag, 1) //把此消费者标记为连接状态
 
 	r.mtx.Lock()
-	for _, x := range r.lookupdHTTPAddrs {
+	for _, x := range r.lookupdHTTPAddrs { //遍历lookupdHTTPAddrs，看是否这个地址已经添加过了，如果添加过了就直接返回，否则将当前addr地址添加到lookupdHTTPAddrs中
 		if x == addr {
 			r.mtx.Unlock()
 			return nil
@@ -327,10 +327,10 @@ func (r *Consumer) ConnectToNSQLookupd(addr string) error {
 	r.mtx.Unlock()
 
 	// if this is the first one, kick off the go loop
-	if numLookupd == 1 {
+	if numLookupd == 1 { //如果现在lookupdHTTPAddrs的长度是1，说明没有启动过lookupdLoop，那么进入分支进行这一步工作
 		r.queryLookupd()
 		r.wg.Add(1)
-		go r.lookupdLoop() //开启程进行搜索生产者
+		go r.lookupdLoop() //在这里面会定时向nsqlookupd发送http请求，更新与nsqd的连接，当有新的nsqd负责topic的存储的时候可以马上向这个nsqd获取消息。
 	}
 
 	return nil
@@ -457,12 +457,12 @@ func (r *Consumer) queryLookupd() {
 	retries := 0
 
 retry:
-	endpoint := r.nextLookupdEndpoint()
+	endpoint := r.nextLookupdEndpoint() //拿到Lookupd的url
 
 	r.log(LogLevelInfo, "querying nsqlookupd %s", endpoint)
 
 	var data lookupResp
-	err := apiRequestNegotiateV1("GET", endpoint, nil, &data)
+	err := apiRequestNegotiateV1("GET", endpoint, nil, &data) //请求nsqlookupd获取分配给此消费者的nsqd节点信息,nsqlookupd会向消费者返回存在用户想消费的topic的所有nsqd的地址
 	if err != nil {
 		r.log(LogLevelError, "error querying nsqlookupd (%s) - %s", endpoint, err)
 		retries++
@@ -474,7 +474,7 @@ retry:
 	}
 
 	var nsqdAddrs []string
-	for _, producer := range data.Producers {
+	for _, producer := range data.Producers { //遍历返回的生产者，组装成nsqdAdders
 		broadcastAddress := producer.BroadcastAddress
 		port := producer.TCPPort
 		joined := net.JoinHostPort(broadcastAddress, strconv.Itoa(port))
@@ -484,7 +484,7 @@ retry:
 	if discoveryFilter, ok := r.behaviorDelegate.(DiscoveryFilter); ok {
 		nsqdAddrs = discoveryFilter.Filter(nsqdAddrs)
 	}
-	for _, addr := range nsqdAddrs {
+	for _, addr := range nsqdAddrs { //和过滤后的nsqd建立联系
 		err = r.ConnectToNSQD(addr)
 		if err != nil && err != ErrAlreadyConnected {
 			r.log(LogLevelError, "(%s) error connecting to nsqd - %s", addr, err)
@@ -533,6 +533,9 @@ func (r *Consumer) ConnectToNSQD(addr string) error {
 	conn.SetLogger(logger, logLvl,
 		fmt.Sprintf("%3d [%s/%s] (%%s)", r.id, r.topic, r.channel))
 
+	//并没有马上建立连接，先从pendingConnections和connections中尝试获取addr对应的conn，如果获取到了，
+	// 说明建立过连接了，直接返回，否则先添加到pendingConnections中，创建了一个匿名函数cleanupConnection，
+	// 当连接建立失败后进行清理工作，之后才正式建立连接。
 	r.mtx.Lock()
 	_, pendingOk := r.pendingConnections[addr]
 	_, ok := r.connections[addr]
@@ -567,7 +570,8 @@ func (r *Consumer) ConnectToNSQD(addr string) error {
 				conn.String(), resp.MaxRdyCount, r.getMaxInFlight())
 		}
 	}
-
+	//如果成功建立一个订阅命令，通过conn向当前的nsqd发送过去，
+	//更新pendingConnections和connections，最后检查当前consumer的所有conn是否有必要更新RDY的值
 	cmd := Subscribe(r.topic, r.channel)
 	err = conn.WriteCommand(cmd)
 	if err != nil {
@@ -1093,7 +1097,7 @@ func (r *Consumer) AddConcurrentHandlers(handler Handler, concurrency int) {
 		panic("already connected")
 	}
 
-	atomic.AddInt32(&r.runningHandlers, int32(concurrency))
+	atomic.AddInt32(&r.runningHandlers, int32(concurrency)) //记录这个消费者正在做处理的协程数量
 	for i := 0; i < concurrency; i++ {
 		go r.handlerLoop(handler) //里面是个死循环。consumer模块内，有一个 handleloop不断轮询incomingMessages管道来接收connection模块发过来的消息。
 	}
@@ -1124,7 +1128,7 @@ func (r *Consumer) handlerLoop(handler Handler) { //这是个协程
 			continue
 		}
 
-		if !message.IsAutoResponseDisabled() {
+		if !message.IsAutoResponseDisabled() { //这个消息是否需要自动回复
 			message.Finish() //完成一条消息
 		}
 	}
@@ -1136,7 +1140,8 @@ exit:
 	}
 }
 
-func (r *Consumer) shouldFailMessage(message *Message, handler interface{}) bool {
+func (r *Consumer) shouldFailMessage(message *Message,
+	handler interface{}) bool {
 	// message passed the max number of attempts
 	if r.config.MaxAttempts > 0 && message.Attempts > r.config.MaxAttempts {
 		r.log(LogLevelWarning, "msg %s attempted %d times, giving up",

@@ -91,7 +91,7 @@ type Consumer struct {
 	totalRdyCount    int64  //用来计算可接收消息数量,它永远不会大于 maxInFlight，每当收到一个消息后会对其减 1。maxrdycount表示客户端的最大rdy数
 	backoffDuration  int64
 	backoffCounter   int32
-	maxInFlight      int32 //用来标识一次可接受的最大消息数量
+	maxInFlight      int32 //客户端库应保证，指定的消费者,每个连接的 RDY 的计数的总和total_rdy_count不应超过配置的 max_in_flight 。
 
 	mtx sync.RWMutex
 
@@ -168,7 +168,7 @@ func NewConsumer(topic string, channel string, config *Config) (*Consumer, error
 
 		logger:      log.New(os.Stderr, "", log.Flags()),
 		logLvl:      LogLevelInfo,
-		maxInFlight: int32(config.MaxInFlight), //用来标识可以处理的最大消息数量
+		maxInFlight: int32(config.MaxInFlight), //若此值设置成1，就不会启用缓冲区，但是这样就需要前一条消息ACK后才处理下一条，所以不可取。
 
 		incomingMessages: make(chan *Message),
 
@@ -184,6 +184,7 @@ func NewConsumer(topic string, channel string, config *Config) (*Consumer, error
 		exitChan: make(chan int),
 	}
 	r.wg.Add(1)
+	//nsqd的客户端在连接nsqd的时候就会设置一个初始的rdycount 。当然，在连接成功之后，也会有一个gorountine 后台不断去调整这个rdycount
 	go r.rdyLoop() //定时更新RDY的值，它是用来控制服务端向客户端推送的消息的数量的。
 	return r, nil
 }
@@ -517,7 +518,7 @@ func (r *Consumer) ConnectToNSQD(addr string) error {
 	if atomic.LoadInt32(&r.stopFlag) == 1 {
 		return errors.New("consumer stopped")
 	}
-	//检查有多少个处理函数协程在跑（只要接受的incomingMessages channel不被关闭，处理函数是不会退出for循环的）
+	//检查有多少个处理函数协程在跑（只要接受的incomingMessages channel不被关闭，处理协程是不会退出for循环的）
 	//由此if语句可见，消费者在连接到nsqd之前必须要通过AddHandler添加处理函数
 	if atomic.LoadInt32(&r.runningHandlers) == 0 {
 		return errors.New("no handlers")
@@ -543,9 +544,9 @@ func (r *Consumer) ConnectToNSQD(addr string) error {
 		r.mtx.Unlock()
 		return ErrAlreadyConnected
 	}
-	r.pendingConnections[addr] = conn
+	r.pendingConnections[addr] = conn //pendingConnections在执行Connect()函数之前添加数据，connections在执行Connect()函数之后添加数据
 	if idx := indexOf(addr, r.nsqdTCPAddrs); idx == -1 {
-		r.nsqdTCPAddrs = append(r.nsqdTCPAddrs, addr)
+		r.nsqdTCPAddrs = append(r.nsqdTCPAddrs, addr) //nsqdTCPAddrs里面专门存这个客户端要连接的所有nsqd的地址
 	}
 	r.mtx.Unlock()
 
@@ -553,18 +554,18 @@ func (r *Consumer) ConnectToNSQD(addr string) error {
 
 	cleanupConnection := func() {
 		r.mtx.Lock()
-		delete(r.pendingConnections, addr)
+		delete(r.pendingConnections, addr) //delete是专门删map中的元素的。
 		r.mtx.Unlock()
 		conn.Close()
 	}
 
 	resp, err := conn.Connect() //producer 和 consumer 会调用 Connect() 函数与 nsq 建立连接
-	if err != nil {
+	if err != nil { //若连接出错
 		cleanupConnection()
 		return err
 	}
 	if resp != nil {
-		if resp.MaxRdyCount < int64(r.getMaxInFlight()) {
+		if resp.MaxRdyCount < int64(r.getMaxInFlight()) { //客户端能处理的最大值若小于传输中的消息允许的最大数量，则报错
 			r.log(LogLevelWarning,
 				"(%s) max RDY count %d < consumer max in flight %d, truncation possible",
 				conn.String(), resp.MaxRdyCount, r.getMaxInFlight())
@@ -593,7 +594,7 @@ func (r *Consumer) ConnectToNSQD(addr string) error {
 	for _, c := range r.conns() { //会遍历这个Consumer的所有nsqd conn（Consumer可以同时连接多个nsqd），然后调用	maybeUpdateRDY 这个方法
 		//当客户端连接到 nsqd 和并订阅到一个通道时，它被放置在一个 RDY 为 0 状态。这意味着，还没有信息被发送到客户端。
 		// 当客户端已准备好接收消息发送，更新它的命令 RDY 状态到它准备处理的数量，比如 100。无需任何额外的指令，当 100 条消息可用时，将被传递到客户端
-		r.maybeUpdateRDY(c) //这表示每当处理一条消息或者建立一个连接，都有可能重新进行并发控制计算。重新均衡分配，最理想的情况是 MaxInFlight / len(conns)
+		r.maybeUpdateRDY(c) //这表示每当处理一条消息或者建立一个连接，都有可能重新进行并发控制计算。重新均衡分配，最理想的情况是 MaxInFlight / len(conns)，把RDY计数均衡分布到所有连接。
 	}
 
 	return nil
@@ -881,6 +882,8 @@ func (r *Consumer) inBackoffTimeout() bool {
 }
 
 func (r *Consumer) maybeUpdateRDY(conn *Conn) {
+	//backoff：退避算法或者回退算法，当消息处理失败，接下去应该做什么， 是个很复杂的问题。
+	//通过退避算法，消费者允许下游系统从瞬态故障中恢复。 这种行为应该可配置的。因为它并不一定需要，例如在低延迟的环境。
 	inBackoff := r.inBackoff()
 	inBackoffTimeout := r.inBackoffTimeout()
 	if inBackoff || inBackoffTimeout {

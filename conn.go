@@ -21,7 +21,7 @@ import (
 // IdentifyResponse represents the metadata
 // returned from an IDENTIFY command to nsqd
 type IdentifyResponse struct {
-	MaxRdyCount  int64 `json:"max_rdy_count"`
+	MaxRdyCount  int64 `json:"max_rdy_count"` //这玩意是nsqd端配置的，每个连接不能超过 nsqd 配置 max_rdy_count 。
 	TLSv1        bool  `json:"tls_v1"`
 	Deflate      bool  `json:"deflate"`
 	Snappy       bool  `json:"snappy"`
@@ -47,10 +47,11 @@ type msgResponse struct {
 //
 // Conn exposes a set of callbacks for the
 // various events that occur on a connection
-type Conn struct { //全部是私有变量
+type Conn struct {
+	//全部是私有变量
 	// 64bit atomic vars need to be first for proper alignment on 32bit platforms
 	messagesInFlight int64 //来一个消息就加1，表示正在处理的消息数量
-	maxRdyCount      int64 //当前 connection 可接收的消息数量的最大值
+	maxRdyCount      int64 //当前 connection 可接收的消息数量的最大值（是配置的时候设的个固定值）
 	rdyCount         int64 //用来标识当前 connection 可接收的消息数量的最大值，如果收到一个消息就对其减 1。
 	lastRdyTimestamp int64
 	lastMsgTimestamp int64
@@ -93,16 +94,16 @@ func NewConn(addr string, config *Config, delegate ConnDelegate) *Conn {
 	return &Conn{
 		addr: addr, //服务器地址
 
-		config:   config, //基本的服务端配置
+		config:   config,   //基本的服务端配置
 		delegate: delegate, //producer 与 consumer 用来处理消息回调的接口
 
-		maxRdyCount:      2500, //并发控制数量
+		maxRdyCount:      2500,
 		lastMsgTimestamp: time.Now().UnixNano(), //上一条消息抵达的时间
 
-		cmdChan:         make(chan *Command), //与服务器的 cmd 管道
+		cmdChan:         make(chan *Command),     //与服务器的 cmd 管道
 		msgResponseChan: make(chan *msgResponse), //消息回应管道
-		exitChan:        make(chan int), //退出信号
-		drainReady:      make(chan int),  //中断信号
+		exitChan:        make(chan int),          //退出信号
+		drainReady:      make(chan int),          //中断信号
 	}
 }
 
@@ -159,7 +160,7 @@ func (c *Conn) Connect() (*IdentifyResponse, error) {
 		return nil, fmt.Errorf("[%s] failed to write magic - %s", c.addr, err)
 	}
 
-	resp, err := c.identify()//告诉服务器自己这边的一些配置,如 clientid, hostname, 心跳间隔时长，超时时长等一些配置信息
+	resp, err := c.identify() //告诉服务器自己这边的一些配置,如 clientid, hostname, 心跳间隔时长，超时时长等一些配置信息
 	if err != nil {
 		return nil, err
 	}
@@ -170,7 +171,7 @@ func (c *Conn) Connect() (*IdentifyResponse, error) {
 			return nil, errors.New("Auth Required")
 		}
 		//如果IDENTIFY响应中有auth_required=true，客户端必须在 SUB, PUB 或 MPUB 命令前前发送 AUTH 。否则，客户端不需要认证。
-		err := c.auth(c.config.AuthSecret)//发送授权命令
+		err := c.auth(c.config.AuthSecret) //发送授权命令
 		if err != nil {
 			c.log(LogLevelError, "Auth Failed %s", err)
 			return nil, err
@@ -178,9 +179,9 @@ func (c *Conn) Connect() (*IdentifyResponse, error) {
 	}
 
 	c.wg.Add(2)
-	atomic.StoreInt32(&c.readLoopRunning, 1)
+	atomic.StoreInt32(&c.readLoopRunning, 1) //纯粹的只是用来表示有readLoop在运行
 	//以下与服务端进行通信
-	go c.readLoop()
+	go c.readLoop()//此处读到nsqd发过来的消息并处理之后，下面writeLoop可能需要针对这个消息向nsqd返回指令，指令可以是 REQ，TOUCH，FIN。
 	go c.writeLoop()
 	return resp, nil
 }
@@ -298,7 +299,7 @@ func (c *Conn) identify() (*IdentifyResponse, error) {
 	ci["user_agent"] = c.config.UserAgent
 	ci["short_id"] = c.config.ClientID // deprecated
 	ci["long_id"] = c.config.Hostname  // deprecated
-	ci["tls_v1"] = c.config.TlsV1 //允许 TLS 来连接
+	ci["tls_v1"] = c.config.TlsV1      //允许 TLS 来连接
 	ci["deflate"] = c.config.Deflate
 	ci["deflate_level"] = c.config.DeflateLevel
 	ci["snappy"] = c.config.Snappy //允许 snappy 压缩这次连接
@@ -313,6 +314,7 @@ func (c *Conn) identify() (*IdentifyResponse, error) {
 	if c.config.OutputBufferTimeout == -1 {
 		ci["output_buffer_timeout"] = -1
 	} else {
+		//Consumer 有个配置项: OutputBufferTimeout，这个是设置在 flushing 到客户端前，最长的配置时间间隔。而默认是250ms, 配合OutputBufferTimeout的缓冲区，所以消息会有延迟。
 		ci["output_buffer_timeout"] = int64(c.config.OutputBufferTimeout / time.Millisecond) //超时后，nsqd 缓冲的数据都会刷新到此客户端。
 	}
 	ci["msg_timeout"] = int64(c.config.MsgTimeout / time.Millisecond)
@@ -348,8 +350,8 @@ func (c *Conn) identify() (*IdentifyResponse, error) {
 	}
 
 	c.log(LogLevelDebug, "IDENTIFY response: %+v", resp)
-
-	c.maxRdyCount = resp.MaxRdyCount //客户端会在identify的返回值传入一个 MaxRdyCount，服务端对每个 connection 发送的消息永远不超过这个数字。
+	//每个 nsqd 配置了一个参数 max-rdy-count, 如果消费者发出的 RDY 计数， 超出了这个值，这个连接就会关闭。 为了向后兼容，不支持协商功能的 nsqd 这个值假定为2500.
+	c.maxRdyCount = resp.MaxRdyCount //客户端会在identify的返回值传入一个 MaxRdyCount,表示我客户端一次最大可以接收这么多消息，服务端对每个 connection 发送的消息永远不超过这个数字。
 
 	if resp.TLSv1 {
 		c.log(LogLevelInfo, "upgrading to TLS")
@@ -488,9 +490,9 @@ func (c *Conn) readLoop() {
 			goto exit
 		}
 
-		frameType, data, err := ReadUnpackedResponse(c)
+		frameType, data, err := ReadUnpackedResponse(c) //阻塞着从Conn读服务器发功来的数据
 		if err != nil {
-			if err == io.EOF && atomic.LoadInt32(&c.closeFlag) == 1 {
+			if err == io.EOF && atomic.LoadInt32(&c.closeFlag) == 1 { //服务端发送FIN时才会read到EOF
 				goto exit
 			}
 			if !strings.Contains(err.Error(), "use of closed network connection") {
@@ -500,21 +502,21 @@ func (c *Conn) readLoop() {
 			goto exit
 		}
 
-		if frameType == FrameTypeResponse && bytes.Equal(data, []byte("_heartbeat_")) {
+		if frameType == FrameTypeResponse && bytes.Equal(data, []byte("_heartbeat_")) { //如果读到的是心跳
 			c.log(LogLevelDebug, "heartbeat received")
-			c.delegate.OnHeartbeat(c)
-			err := c.WriteCommand(Nop()) //消息是 heartbeat 会回复一条空指令告诉服务器自己的存活状态
+			c.delegate.OnHeartbeat(c)    //不会做任何事
+			err := c.WriteCommand(Nop()) //消息是 heartbeat会回复一条空指令告诉服务器自己的存活状态
 			if err != nil {
 				c.log(LogLevelError, "IO error - %s", err)
 				c.delegate.OnIOError(c, err)
 				goto exit
 			}
-			continue
+			continue //若读到的是心跳则重新读
 		}
 
 		switch frameType {
 		case FrameTypeResponse:
-			c.delegate.OnResponse(c, data)
+			c.delegate.OnResponse(c, data) //若读到的FrameTypeResponse不是心跳而是CLOSE_WAIT命令，则关闭连接。对于FrameTypeResponse类型，除了心跳和CLOSE_WAIT，其他的不做处理。
 		case FrameTypeMessage:
 			msg, err := DecodeMessage(data)
 			if err != nil {
@@ -522,7 +524,7 @@ func (c *Conn) readLoop() {
 				c.delegate.OnIOError(c, err)
 				goto exit
 			}
-			msg.Delegate = delegate
+			msg.Delegate = delegate //把代理也传进去了，表示是这个网络连接上面的消息，后面操作这个消息的时候可以调用这连接的处理方法。
 			msg.NSQDAddress = c.String()
 
 			atomic.AddInt64(&c.messagesInFlight, 1) //来一个待压入channel的消息就加1，后面在处理完一个消息后这个变量就会减1
@@ -553,22 +555,21 @@ exit:
 	c.wg.Done()
 	c.log(LogLevelInfo, "readLoop exiting")
 }
-//writeloop 主要关心的是发送 cmd 指令，和回复消息处理的状态
-//在 nsq 客户端中一个消息的处理状态有四种。分别是：
+
+//writeloop 主要关心的是发送 cmd 指令，和回复消息处理的状态，在 nsq客户端中一个消息的处理状态有四种。分别是：
 //1.FIN 处理成功，告诉服务端可以放心的丢弃掉这条消息。
 //2.REQ 处理失败，告诉服务端这条消息需要重新入队。
 //3.TOUCH 告诉服务端需要更多的时间处理这条消息。
 //4.消息处理超时，服务端会根据消息处理时长判断消息是否需要重新入队。
-//这里为了消息处理更高效，使用了一个单独的 channel 发送 FIN 和 REQ 状态指令。
 func (c *Conn) writeLoop() {
 	for {
-		select {
+		select { //循环往nsqd写
 		case <-c.exitChan:
 			c.log(LogLevelInfo, "breaking out of writeLoop")
 			// Indicate drainReady because we will not pull any more off msgResponseChan
 			close(c.drainReady)
 			goto exit
-		case cmd := <-c.cmdChan:
+		case cmd := <-c.cmdChan: //cmdChan只是来自于touch，TOUCH告诉服务端需要更多的时间处理这条消息。
 			err := c.WriteCommand(cmd)
 			if err != nil {
 				c.log(LogLevelError, "error sending command %s - %s", cmd, err)
@@ -576,17 +577,18 @@ func (c *Conn) writeLoop() {
 				continue
 			}
 		case resp := <-c.msgResponseChan:
+			//这里为了消息处理更高效，使用了一个单独的 channel 发送 FIN 和 REQ 状态指令。
 			// Decrement this here so it is correct even if we can't respond to nsqd
-			msgsInFlight := atomic.AddInt64(&c.messagesInFlight, -1)
+			msgsInFlight := atomic.AddInt64(&c.messagesInFlight, -1) //回应一个消息，那么InFlight的消息就减1
 
-			if resp.success {
+			if resp.success { //如果成功比表示这个消息已经finish
 				c.log(LogLevelDebug, "FIN %s", resp.msg.ID)
 				c.delegate.OnMessageFinished(c, resp.msg)
 				c.delegate.OnResume(c)
-			} else {
+			} else { //如果不成功就要重新入队
 				c.log(LogLevelDebug, "REQ %s", resp.msg.ID)
 				c.delegate.OnMessageRequeued(c, resp.msg)
-				if resp.backoff {
+				if resp.backoff { //
 					c.delegate.OnBackoff(c)
 				} else {
 					c.delegate.OnContinue(c)

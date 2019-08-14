@@ -51,8 +51,8 @@ type Conn struct {
 	//全部是私有变量
 	// 64bit atomic vars need to be first for proper alignment on 32bit platforms
 	messagesInFlight int64 //来一个消息就加1，表示正在处理的消息数量
-	maxRdyCount      int64 //当前 connection 可接收的消息数量的最大值（是配置的时候设的个固定值）
-	rdyCount         int64 //用来标识当前 connection 可接收的消息数量的最大值，如果收到一个消息就对其减 1。
+	maxRdyCount      int64 //当前connection可接收的消息数量的最大值（是配置的时候设的个固定值），每个连接这个值都是写死的。
+	rdyCount         int64 //用来标识当前connection 还可接收消息的容量，如果收到一个消息就对其减 1。这个值就是告知给nsqd的值。
 	lastRdyTimestamp int64
 	lastMsgTimestamp int64
 
@@ -97,7 +97,7 @@ func NewConn(addr string, config *Config, delegate ConnDelegate) *Conn {
 		config:   config,   //基本的服务端配置
 		delegate: delegate, //producer 与 consumer 用来处理消息回调的接口
 
-		maxRdyCount:      2500,
+		maxRdyCount:      2500, //每个连接这个值都是写死的。
 		lastMsgTimestamp: time.Now().UnixNano(), //上一条消息抵达的时间
 
 		cmdChan:         make(chan *Command),     //与服务器的 cmd 管道
@@ -588,7 +588,7 @@ func (c *Conn) writeLoop() {
 			} else { //如果不成功就要重新入队
 				c.log(LogLevelDebug, "REQ %s", resp.msg.ID)
 				c.delegate.OnMessageRequeued(c, resp.msg)
-				if resp.backoff { //
+				if resp.backoff { //原来backoff是根据消息的返回值来设置的
 					c.delegate.OnBackoff(c)
 				} else {
 					c.delegate.OnContinue(c)

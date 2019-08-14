@@ -88,10 +88,10 @@ type Consumer struct {
 	messagesReceived uint64 //来一个消息就加1一次
 	messagesFinished uint64 //返回一次FIN命令此处就加1
 	messagesRequeued uint64 //消息重新入队就加1
-	totalRdyCount    int64  //用来计算可接收消息数量,它永远不会大于 maxInFlight，每当收到一个消息后会对其减 1。maxrdycount表示客户端的最大rdy数
+	totalRdyCount    int64 //前消费者所有连接的rdyCount（此字段在conn结构体内）之和，即所有连接的可处理消息的总容量，是动态变化的。
 	backoffDuration  int64
 	backoffCounter   int32
-	maxInFlight      int32 //客户端库应保证，指定的消费者,每个连接的 RDY 的计数的总和total_rdy_count不应超过配置的 max_in_flight 。
+	maxInFlight      int32 //客户端能够允许的正在处理的消息的最大数量。指消费者每个连接的 RDY 的计数的总和total_rdy_count不应超过配置的 max_in_flight 。
 
 	mtx sync.RWMutex
 
@@ -168,7 +168,7 @@ func NewConsumer(topic string, channel string, config *Config) (*Consumer, error
 
 		logger:      log.New(os.Stderr, "", log.Flags()),
 		logLvl:      LogLevelInfo,
-		maxInFlight: int32(config.MaxInFlight), //若此值设置成1，就不会启用缓冲区，但是这样就需要前一条消息ACK后才处理下一条，所以不可取。
+		maxInFlight: int32(config.MaxInFlight), //此值在后续不会发生变化，若此值设置成1(config中此处默认设置的是1)，就不会启用缓冲区，但是这样就需要前一条消息ACK后才处理下一条，所以不可取。(这个值其实可以理解成客户端装那些待处理消息的一块缓冲区的大小)
 
 		incomingMessages: make(chan *Message),
 
@@ -257,7 +257,8 @@ func (r *Consumer) SetBehaviorDelegate(cb interface{}) {
 // is responsible for.
 func (r *Consumer) perConnMaxInFlight() int64 {
 	b := float64(r.getMaxInFlight())
-	s := b / float64(len(r.conns())) //能处理消息的最大数量平均到每个连接上的数量
+	s := b / float64(len(r.conns())) //能处理消息的最大数量平均到每个连接上的数量，比如大小为3的MaxInFlight平均到2个连接上，每个上面就是1
+	//这里的len(r.conns())和b(配置文件设置的)至少为1，若b小于len(r.conns())，返回值为1
 	return int64(math.Min(math.Max(1, s), b))
 }
 
@@ -886,15 +887,15 @@ func (r *Consumer) maybeUpdateRDY(conn *Conn) {
 	//通过退避算法，消费者允许下游系统从瞬态故障中恢复。 这种行为应该可配置的。因为它并不一定需要，例如在低延迟的环境。
 	inBackoff := r.inBackoff()
 	inBackoffTimeout := r.inBackoffTimeout()
-	if inBackoff || inBackoffTimeout {
+	if inBackoff || inBackoffTimeout { //判断这个消费者是否是在inBackoff或inBackoffTimeout状态
 		r.log(LogLevelDebug, "(%s) skip sending RDY inBackoff:%v || inBackoffTimeout:%v",
 			conn, inBackoff, inBackoffTimeout)
 		return
 	}
-
 	count := r.perConnMaxInFlight()
+
 	r.log(LogLevelDebug, "(%s) sending RDY %d", conn, count)
-	r.updateRDY(conn, count)
+	r.updateRDY(conn, count) //此时才开始调整这个消费者在单个连接conn上的RDY count
 }
 
 func (r *Consumer) rdyLoop() {
@@ -921,25 +922,26 @@ func (r *Consumer) updateRDY(c *Conn, count int64) error {
 	}
 
 	// never exceed the nsqd's configured max RDY count
-	if count > c.MaxRDY() {
+	if count > c.MaxRDY() {//首先需要确保该值不会超过nsqd设置的最大RDY（nsqd设置的最大RDY值是在与nsqd建立连接时获取到的）
 		count = c.MaxRDY()
 	}
 
 	// stop any pending retry of an old RDY update
 	r.rdyRetryMtx.Lock()
-	if timer, ok := r.rdyRetryTimers[c.String()]; ok {
+	if timer, ok := r.rdyRetryTimers[c.String()]; ok { //rdyRetryTimers的更新只在下面952行出现过。
 		timer.Stop()
 		delete(r.rdyRetryTimers, c.String())
 	}
 	r.rdyRetryMtx.Unlock()
 
-	// never exceed our global max in flight. truncate if possible.
-	// this could help a new connection get partial max-in-flight
-	rdyCount := c.RDY()
-	maxPossibleRdy := int64(r.getMaxInFlight()) - atomic.LoadInt64(&r.totalRdyCount) + rdyCount
-	if maxPossibleRdy > 0 && maxPossibleRdy < count {
+	//所有连接上的RDY之和不能够超过max-in-flight，
+	//因此当前连接上能够设置的RDY的最大值就是max-in-flight减去当前消费者除此连接外所有连接的rdyCount之和，即maxPossibleRdy，使用此值来约束待更新的RDY的上限。
+	rdyCount := c.RDY()//当前连接的rdy数
+	maxPossibleRdy := int64(r.getMaxInFlight()) - atomic.LoadInt64(&r.totalRdyCount) + rdyCount //减去totalRdyCount就是减去所有连接的rdyCount之和，加上rdyCount就是减去当前消费者除此连接外所有连接的rdyCount之和。
+	if maxPossibleRdy > 0 && maxPossibleRdy < count {//如果传进来的“这个连接的count值”比“这个连接上可能的最大RDY值”都大
 		count = maxPossibleRdy
 	}
+	//进了上面的if语句就不可能进下面的if语句，
 	if maxPossibleRdy <= 0 && count > 0 {
 		if rdyCount == 0 {
 			// we wanted to exit a zero RDY count but we couldn't send it...
@@ -948,14 +950,14 @@ func (r *Consumer) updateRDY(c *Conn, count int64) error {
 			r.rdyRetryMtx.Lock()
 			r.rdyRetryTimers[c.String()] = time.AfterFunc(5*time.Second,
 				func() {
-					r.updateRDY(c, count)
+					r.updateRDY(c, count)//递归,过5秒会执行
 				})
 			r.rdyRetryMtx.Unlock()
 		}
 		return ErrOverMaxInFlight
 	}
 
-	return r.sendRDY(c, count)
+	return r.sendRDY(c, count) //若count为0，上面所有操作都不会进入。
 }
 
 func (r *Consumer) sendRDY(c *Conn, count int64) error {
@@ -963,9 +965,9 @@ func (r *Consumer) sendRDY(c *Conn, count int64) error {
 		// no need to send. It's already that RDY count
 		return nil
 	}
-
-	atomic.AddInt64(&r.totalRdyCount, count-c.RDY())
-	c.SetRDY(count)
+	//更新了totalRdyCount（另外一个更新此值的地方是close的时候），即所有连接的RDY之和(当前连接之外的其他所有连接的RDY之和)，同时更新当前连接的RDY。
+	atomic.AddInt64(&r.totalRdyCount, count-c.RDY())//c.RDY()是当前连接的rdy数，结合前面的maxPossibleRdy可知，此处count-c.RDY()表示maxinflight-totalRdyCount,所以相加后此处totalRdyCount就成了表示maxinflight
+	c.SetRDY(count) //唯一一处设置此连接的rdyCount值，这个值就是传输给nsqd的值
 	err := c.WriteCommand(Ready(int(count))) //告诉nsqd你可以向我提供count个消息
 	if err != nil {
 		r.log(LogLevelError, "(%s) error sending RDY %d - %s", c.String(), count, err)
@@ -987,7 +989,7 @@ func (r *Consumer) redistributeRDY() {
 	}
 
 	maxInFlight := r.getMaxInFlight()
-	if len(conns) > int(maxInFlight) {
+	if len(conns) > int(maxInFlight) { //当连接数大于maxInFlight的时候，收到的消息的数量就会大于maxInFlight，这样就要超出我们客户端的处理要求了，所以就需要进行调整。怎么个调整法呢？
 		r.log(LogLevelDebug, "redistributing RDY state (%d conns > %d max_in_flight)",
 			len(conns), maxInFlight)
 		atomic.StoreInt32(&r.needRDYRedistributed, 1)
@@ -998,31 +1000,31 @@ func (r *Consumer) redistributeRDY() {
 		atomic.StoreInt32(&r.needRDYRedistributed, 1)
 	}
 
-	if !atomic.CompareAndSwapInt32(&r.needRDYRedistributed, 1, 0) {
+	if !atomic.CompareAndSwapInt32(&r.needRDYRedistributed, 1, 0) {//若相等则交换，返回值代表是否交换
 		return
 	}
-
+	//若len(conns) > int(maxInFlight)的情况下继续往下走进行rdy的重新分配，不然上一步就return了
 	possibleConns := make([]*Conn, 0, len(conns))
 	for _, c := range conns {
 		lastMsgDuration := time.Now().Sub(c.LastMessageTime()) //LastMessageTime 是上一条消息处理前设定的时间
 		lastRdyDuration := time.Now().Sub(c.LastRdyTime())     //lastRdyTimestamp 是这个 connection 上一次调用 SetRdyCount 的时间。
-		rdyCount := c.RDY()
+		rdyCount := c.RDY()//表示当前连接的rdy数（可接收消息的容量值）
 		r.log(LogLevelDebug, "(%s) rdy: %d (last message received %s)",
 			c.String(), rdyCount, lastMsgDuration)
-		if rdyCount > 0 {
-			//这两个时间的对比主要是为了找出那些处理消息比较慢的连接，尽量让其他的 connection 去接收消息。
+		if rdyCount > 0 { //若这个连接还在接收消息的话，下面就判断是否让其不要接收消息。
+			//这两个时间的对比主要是为了找出那些处理消息比较慢的连接，让这些连接别发消息了，尽量让其他优质的connection去接收消息。
 			if lastMsgDuration > r.config.LowRdyIdleTimeout {
 				r.log(LogLevelDebug, "(%s) idle connection, giving up RDY", c.String())
-				r.updateRDY(c, 0)
+				r.updateRDY(c, 0) //告诉相应连接的nsqd别在此连接上发消息了
 			} else if lastRdyDuration > r.config.LowRdyTimeout {
 				r.log(LogLevelDebug, "(%s) RDY timeout, giving up RDY", c.String())
 				r.updateRDY(c, 0)
 			}
 		}
-		possibleConns = append(possibleConns, c)
+		possibleConns = append(possibleConns, c)//优质的连接
 	}
 
-	availableMaxInFlight := int64(maxInFlight) - atomic.LoadInt64(&r.totalRdyCount) // //计算空余可以分配的的 RDY 数量
+	availableMaxInFlight := int64(maxInFlight) - atomic.LoadInt64(&r.totalRdyCount) //计算空余可以分配的的 RDY 数量
 	if r.inBackoff() {
 		availableMaxInFlight = 1 - atomic.LoadInt64(&r.totalRdyCount)
 	}
@@ -1117,7 +1119,7 @@ func (r *Consumer) handlerLoop(handler Handler) { //这是个协程
 			goto exit
 		}
 
-		if r.shouldFailMessage(message, handler) {
+		if r.shouldFailMessage(message, handler) {//shouldFailMessage只能判断处理重试次数过多的失败
 			message.Finish() //发送这个消息的FINISH命令
 			continue
 		}

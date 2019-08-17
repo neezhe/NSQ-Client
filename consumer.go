@@ -168,7 +168,7 @@ func NewConsumer(topic string, channel string, config *Config) (*Consumer, error
 
 		logger:      log.New(os.Stderr, "", log.Flags()),
 		logLvl:      LogLevelInfo,
-		maxInFlight: int32(config.MaxInFlight), //此值在后续不会发生变化，若此值设置成1(config中此处默认设置的是1)，就不会启用缓冲区，但是这样就需要前一条消息ACK后才处理下一条，所以不可取。(这个值其实可以理解成客户端装那些待处理消息的一块缓冲区的大小)
+		maxInFlight: 3,//int32(config.MaxInFlight), //此值在后续不会发生变化，若此值设置成1(config中此处默认设置的是1)，就不会启用缓冲区，但是这样就需要前一条消息ACK后才处理下一条，所以不可取。(这个值其实可以理解成客户端装那些待处理消息的一块缓冲区的大小)
 
 		incomingMessages: make(chan *Message),
 
@@ -329,8 +329,8 @@ func (r *Consumer) ConnectToNSQLookupd(addr string) error {
 	r.mtx.Unlock()
 
 	// if this is the first one, kick off the go loop
-	if numLookupd == 1 { //如果现在lookupdHTTPAddrs的长度是1，说明没有启动过lookupdLoop，那么进入分支进行这一步工作
-		r.queryLookupd()
+	if numLookupd == 1 { //如果现在lookupdHTTPAddrs的长度是1，说明没有启动过lookupdLoop。下面的代码只会在第一个lookupdHTTPAddr时执行
+		r.queryLookupd()//开始访问链接http://127.0.0.1:4161/lookup?topic=lizhe，拿到这个topic所在nsqd的地址
 		r.wg.Add(1)
 		go r.lookupdLoop() //在这里面会定时向nsqlookupd发送http请求，更新与nsqd的连接，当有新的nsqd负责topic的存储的时候可以马上向这个nsqd获取消息。
 	}
@@ -476,16 +476,21 @@ retry:
 	}
 
 	var nsqdAddrs []string
+
 	for _, producer := range data.Producers { //遍历返回的生产者，组装成nsqdAdders
+
 		broadcastAddress := producer.BroadcastAddress
 		port := producer.TCPPort
 		joined := net.JoinHostPort(broadcastAddress, strconv.Itoa(port))
 		nsqdAddrs = append(nsqdAddrs, joined)
+		fmt.Println("=====Producers========",broadcastAddress,port,nsqdAddrs)
+
 	}
 	// apply filter
 	if discoveryFilter, ok := r.behaviorDelegate.(DiscoveryFilter); ok {
 		nsqdAddrs = discoveryFilter.Filter(nsqdAddrs)
 	}
+	fmt.Println("=====nsqdAddrs========",nsqdAddrs)
 	for _, addr := range nsqdAddrs { //和过滤后的nsqd建立联系
 		err = r.ConnectToNSQD(addr)
 		if err != nil && err != ErrAlreadyConnected {
@@ -937,13 +942,17 @@ func (r *Consumer) updateRDY(c *Conn, count int64) error {
 	//所有连接上的RDY之和不能够超过max-in-flight，
 	//因此当前连接上能够设置的RDY的最大值就是max-in-flight减去当前消费者除此连接外所有连接的rdyCount之和，即maxPossibleRdy，使用此值来约束待更新的RDY的上限。
 	rdyCount := c.RDY()//当前连接的rdy数
+	//解释一下maxPossibleRdy
+	//1.当maxInFlight为3，若连接数有2个，则totalRdyCount为2，则maxPossibleRd就可能为1或者2或者3
+	//此时传进来的count为1，显然这种情况不可能有maxPossibleRdy < count
+	//2.当maxInFlight为4，若连接数有2个，则totalRdyCount为4，则
 	maxPossibleRdy := int64(r.getMaxInFlight()) - atomic.LoadInt64(&r.totalRdyCount) + rdyCount //减去totalRdyCount就是减去所有连接的rdyCount之和，加上rdyCount就是减去当前消费者除此连接外所有连接的rdyCount之和。
 	if maxPossibleRdy > 0 && maxPossibleRdy < count {//如果传进来的“这个连接的count值”比“这个连接上可能的最大RDY值”都大
 		count = maxPossibleRdy
 	}
-	//进了上面的if语句就不可能进下面的if语句，
-	if maxPossibleRdy <= 0 && count > 0 {
-		if rdyCount == 0 {
+	//进了上面的if语句就不可能进下面的if语句
+	if maxPossibleRdy <= 0 && count > 0 {//如果打算往这个连接上设置rdy为count的容量,但是这个连接上本身rdyCount为0
+		if rdyCount == 0 { //信息流不足，就要关闭一些RDY为0的连接
 			// we wanted to exit a zero RDY count but we couldn't send it...
 			// in order to prevent eternal starvation we reschedule this attempt
 			// (if any other RDY update succeeds this timer will be stopped)
@@ -966,7 +975,7 @@ func (r *Consumer) sendRDY(c *Conn, count int64) error {
 		return nil
 	}
 	//更新了totalRdyCount（另外一个更新此值的地方是close的时候），即所有连接的RDY之和(当前连接之外的其他所有连接的RDY之和)，同时更新当前连接的RDY。
-	atomic.AddInt64(&r.totalRdyCount, count-c.RDY())//c.RDY()是当前连接的rdy数，结合前面的maxPossibleRdy可知，此处count-c.RDY()表示maxinflight-totalRdyCount,所以相加后此处totalRdyCount就成了表示maxinflight
+	atomic.AddInt64(&r.totalRdyCount, count-c.RDY())//count是分配给这个连接的rdy容量，c.RDY()表示这个连接多出的rdy容量，相减就是多出的容量，可以为负。每个连接调整rdy数的时候也要更新消费者totalRdyCount
 	c.SetRDY(count) //唯一一处设置此连接的rdyCount值，这个值就是传输给nsqd的值
 	err := c.WriteCommand(Ready(int(count))) //告诉nsqd你可以向我提供count个消息
 	if err != nil {
@@ -1112,7 +1121,6 @@ func (r *Consumer) handlerLoop(handler Handler) { //这是个协程
 	r.log(LogLevelDebug, "starting Handler")
 
 	for {
-		fmt.Println("=========r========", r)
 
 		message, ok := <-r.incomingMessages //会阻塞,不断轮询 incomingMessages 管道来接收 connection 模块发过来的消息。
 		if !ok { //这个channel关闭的时候。由此可见当此协程退出的时候，runningHandlers会自动减1

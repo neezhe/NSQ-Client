@@ -10,7 +10,7 @@ func doSimpleConsumerTask() {
 	// 1. 创建消费者
 	config := nsq.NewConfig()
 	//第一个参数是话题test，第二是通道名字，然后用AddHandler添加一个消费处理函数，在处理函数中会打印这个消息。
-	q, errNewCsmr := nsq.NewConsumer("lizhe", "ch-a-test", config) //新建一个消费者
+	q, errNewCsmr := nsq.NewConsumer("lizhe", "z1", config) //新建一个消费者
 	if errNewCsmr != nil {
 		fmt.Printf("fail to new consumer!, topic=%s, channel=%s", "a-test", "ch-a-test")
 	}
@@ -24,18 +24,18 @@ func doSimpleConsumerTask() {
 	}))
 
 	// 3. 通过http请求来发现nsqd生产者和配置的topic（推荐使用这种方式）
-	//lookupAddr := []string{
-	//	"127.0.0.1:4161",
-	//}
-	//err := q.ConnectToNSQLookupds(lookupAddr)
-	//if err != nil {
-	//	log.Panic("[ConnectToNSQLookupds] Could not find nsqd!")
-	//}
+	lookupAddr := []string{
+		"127.0.0.1:4161",
+	}
+	err := q.ConnectToNSQLookupds(lookupAddr)
+	if err != nil {
+		log.Panic("[ConnectToNSQLookupds] Could not find nsqd!")
+	}
 	//如果本身知道nsqd的地址，也可不通过Lookupds来查找
-		err := q.ConnectToNSQD("127.0.0.1:4150")
-		if err != nil {
-			log.Panic(err)
-		}
+	//	err := q.ConnectToNSQD("127.0.0.1:4150")
+	//	if err != nil {
+	//		log.Panic(err)
+	//	}
 
 	// 4. 接收消费者停止通知
 	<-q.StopChan

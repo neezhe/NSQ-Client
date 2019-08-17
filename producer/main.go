@@ -29,7 +29,7 @@ func main() {
 		}
 		time.Sleep(time.Second * 1)
 
-		break
+		//break
 	}
 
 	w.Stop()

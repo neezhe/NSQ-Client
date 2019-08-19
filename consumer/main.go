@@ -10,7 +10,7 @@ func doSimpleConsumerTask() {
 	// 1. 创建消费者
 	config := nsq.NewConfig()
 	//第一个参数是话题test，第二是通道名字，然后用AddHandler添加一个消费处理函数，在处理函数中会打印这个消息。
-	q, errNewCsmr := nsq.NewConsumer("lizhe", "ch-a-test", config) //新建一个消费者
+	q, errNewCsmr := nsq.NewConsumer("lizhe", "z1", config) //新建一个消费者
 	if errNewCsmr != nil {
 		fmt.Printf("fail to new consumer!, topic=%s, channel=%s", "a-test", "ch-a-test")
 	}

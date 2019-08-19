@@ -9,7 +9,7 @@ import (
 
 func main() {
 	config := nsq.NewConfig()
-	w, err := nsq.NewProducer("127.0.0.1:4150", config) //第一个参数就是nsqd的地址
+	w, err := nsq.NewProducer("192.168.0.107:4150", config) //第一个参数就是nsqd的地址
 
 	if err != nil {
 		log.Panic(err)

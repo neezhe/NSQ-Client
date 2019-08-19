@@ -529,7 +529,7 @@ func (c *Conn) readLoop() {
 
 			atomic.AddInt64(&c.messagesInFlight, 1) //来一个待压入channel的消息就加1，后面在处理完一个消息后这个变量就会减1
 			atomic.StoreInt64(&c.lastMsgTimestamp, time.Now().UnixNano())
-
+			//不同的连接代理了相同的消费者，所以当
 			c.delegate.OnMessage(c, msg) //读到消息，其实调用的就是consumer的onConnMessage函数，把 message 发送到 incomingMessages 管道里面
 		case FrameTypeError:
 			c.log(LogLevelError, "protocol error - %s", data)

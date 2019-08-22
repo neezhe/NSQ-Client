@@ -180,7 +180,7 @@ func (c *Conn) Connect() (*IdentifyResponse, error) {
 
 	c.wg.Add(2)
 	atomic.StoreInt32(&c.readLoopRunning, 1) //纯粹的只是用来表示有readLoop在运行
-	//以下与服务端进行通信
+	//以下与服务端进行通信，两个无限循环的协程。
 	go c.readLoop()//此处读到nsqd发过来的消息并处理之后，下面writeLoop可能需要针对这个消息向nsqd返回指令，指令可以是 REQ，TOUCH，FIN。
 	go c.writeLoop()
 	return resp, nil

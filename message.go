@@ -21,11 +21,10 @@ type Message struct {
 	Body      []byte
 	Timestamp int64
 	Attempts  uint16 //这个消息的尝试次数
-
+	//上面这4个字段由nsqd发过来，下面消费者自己填
 	NSQDAddress string
-
 	Delegate MessageDelegate
-
+	//下面两个一般没用到
 	autoResponseDisabled int32
 	responded            int32
 }

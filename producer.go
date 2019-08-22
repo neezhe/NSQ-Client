@@ -275,7 +275,7 @@ func (w *Producer) connect() error {
 
 	logger, logLvl := w.getLogger()
 
-	w.conn = NewConn(w.addr, &w.config, &producerConnDelegate{w})
+	w.conn = NewConn(w.addr, &w.config, &producerConnDelegate{w}) //第二个参数是producer的代理
 	w.conn.SetLogger(logger, logLvl, fmt.Sprintf("%3d (%%s)", w.id))
 
 	_, err := w.conn.Connect() //同样的，发送v2协议，identify命令，可能发送AUTH命令

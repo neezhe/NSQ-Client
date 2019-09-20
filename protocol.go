@@ -51,7 +51,7 @@ func ReadResponse(r io.Reader) ([]byte, error) {
 	var msgSize int32
 
 	// message size
-	err := binary.Read(r, binary.BigEndian, &msgSize)
+	err := binary.Read(r, binary.BigEndian, &msgSize) //r是个读取器，怎么读？看这个读取器的Read函数是怎么实现的。
 	if err != nil {
 		return nil, err
 	}

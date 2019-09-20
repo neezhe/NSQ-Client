@@ -1001,7 +1001,7 @@ func (r *Consumer) redistributeRDY() {
 	// if an external heuristic set needRDYRedistributed we want to wait
 	// until we can actually redistribute to proceed
 	conns := r.conns()
-	if len(conns) == 0 {
+	if len(conns) == 0 { //没有连接，所以就谈不上调整rdy了
 		return
 	}
 
@@ -1122,7 +1122,6 @@ func (r *Consumer) AddConcurrentHandlers(handler Handler, concurrency int) {
 	if atomic.LoadInt32(&r.connectedFlag) == 1 {
 		panic("already connected")
 	}
-
 	atomic.AddInt32(&r.runningHandlers, int32(concurrency)) //记录这个消费者正在做处理的协程数量
 	for i := 0; i < concurrency; i++ {
 		go r.handlerLoop(handler) //里面是个死循环。consumer模块内，有一个 handleloop不断轮询incomingMessages管道来接收connection模块发过来的消息。
@@ -1133,12 +1132,12 @@ func (r *Consumer) handlerLoop(handler Handler) { //这是个协程
 	r.log(LogLevelDebug, "starting Handler")
 
 	for {
-
+		fmt.Println("=======message=init======")
 		message, ok := <-r.incomingMessages //会阻塞,不断轮询 incomingMessages 管道来接收 connection 模块发过来的消息。
 		if !ok { //这个channel关闭的时候。由此可见当此协程退出的时候，runningHandlers会自动减1
 			goto exit
 		}
-
+		fmt.Println("=======message=======",string(message.Body))
 		if r.shouldFailMessage(message, handler) {//shouldFailMessage只能判断处理重试次数过多的失败
 			message.Finish() //发送这个消息的FINISH命令
 			continue

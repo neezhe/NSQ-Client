@@ -37,7 +37,7 @@ func (c *Command) WriteTo(w io.Writer) (int64, error) {
 	var total int64
 	var buf [4]byte
 
-	n, err := w.Write(c.Name)
+	n, err := w.Write(c.Name)//w是写入器，规定了内容写入到哪里,具体怎么写。这个由w实现的Write函数来指定。
 	total += int64(n)
 	if err != nil {
 		return total, err

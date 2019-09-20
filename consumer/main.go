@@ -19,23 +19,23 @@ func doSimpleConsumerTask() {
 	//里面会开几个协程（默认为1）来轮询这个消息管道incomingMessages，里面的消息是readLoop放进去的。readLoop在ConnectToNSQD中
 	q.AddHandler(nsq.HandlerFunc(func(message *nsq.Message) error {
 		log.Printf("message: %v", string(message.Body))
-		message.Finish()
+		message.Finish()//消息处理完就发送FIN
 		return nil
 	}))
 
 	// 3. 通过http请求来发现nsqd生产者和配置的topic（推荐使用这种方式）
-	lookupAddr := []string{
-		"127.0.0.1:4161",
-	}
-	err := q.ConnectToNSQLookupds(lookupAddr)
-	if err != nil {
-		log.Panic("[ConnectToNSQLookupds] Could not find nsqd!")
-	}
+	//lookupAddr := []string{
+	//	"127.0.0.1:4161",
+	//}
+	//err := q.ConnectToNSQLookupds(lookupAddr)
+	//if err != nil {
+	//	log.Panic("[ConnectToNSQLookupds] Could not find nsqd!")
+	//}
 	//如果本身知道nsqd的地址，也可不通过Lookupds来查找
-	//	err := q.ConnectToNSQD("127.0.0.1:4150")
-	//	if err != nil {
-	//		log.Panic(err)
-	//	}
+		err := q.ConnectToNSQD("127.0.0.1:4150")
+		if err != nil {
+			log.Panic(err)
+		}
 
 	// 4. 接收消费者停止通知
 	<-q.StopChan

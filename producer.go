@@ -217,7 +217,7 @@ func (w *Producer) DeferredPublishAsync(topic string, delay time.Duration, body 
 
 func (w *Producer) sendCommand(cmd *Command) error {
 	doneChan := make(chan *ProducerTransaction)
-	err := w.sendCommandAsync(cmd, doneChan, nil)
+	err := w.sendCommandAsync(cmd, doneChan, nil) //这个doneChan由什么传出？
 	if err != nil {
 		close(doneChan)
 		return err
@@ -234,7 +234,7 @@ func (w *Producer) sendCommandAsync(cmd *Command, doneChan chan *ProducerTransac
 	defer atomic.AddInt32(&w.concurrentProducers, -1)
 
 	if atomic.LoadInt32(&w.state) != StateConnected {
-		err := w.connect()
+		err := w.connect() //与nsqd开始建立连接
 		if err != nil {
 			return err
 		}
@@ -242,7 +242,7 @@ func (w *Producer) sendCommandAsync(cmd *Command, doneChan chan *ProducerTransac
 
 	t := &ProducerTransaction{
 		cmd:      cmd,
-		doneChan: doneChan,
+		doneChan: doneChan, //这个参数在哪里被传入值？在上面w.connect()的w.router()中的popTransaction会将弹出的那个ProducerTransaction压入doneChan。
 		Args:     args,
 	}
 
@@ -274,11 +274,11 @@ func (w *Producer) connect() error {
 	w.log(LogLevelInfo, "(%s) connecting to nsqd", w.addr)
 
 	logger, logLvl := w.getLogger()
-
-	w.conn = NewConn(w.addr, &w.config, &producerConnDelegate{w}) //第二个参数是producer的代理
+	//第二个参数是producer的代理,是一个代理结构体,producerConnDelegate和consumerConnDelegate都是connDelegate类型，因为他们都实现了connDelegate接口。
+	w.conn = NewConn(w.addr, &w.config, &producerConnDelegate{w})
 	w.conn.SetLogger(logger, logLvl, fmt.Sprintf("%3d (%%s)", w.id))
-
-	_, err := w.conn.Connect() //同样的，发送v2协议，identify命令，可能发送AUTH命令
+	//w.conn实现了producerConn接口，所以w.conn也是producerConn类型.此处和consummer中的Connect的类型不一样，此处是一个接口，
+	_, err := w.conn.Connect() //同样的，发送v2协议，identify命令，可能发送AUTH命令,并开启一个readLoop和一个writeLoop
 	if err != nil {
 		w.conn.Close()
 		w.log(LogLevelError, "(%s) error connecting to nsqd - %s", w.addr, err)
@@ -287,7 +287,7 @@ func (w *Producer) connect() error {
 	atomic.StoreInt32(&w.state, StateConnected)
 	w.closeChan = make(chan int)
 	w.wg.Add(1)
-	go w.router()
+	go w.router() //卧槽，这个线程就是专门开始发送数据的。
 
 	return nil
 }
@@ -310,12 +310,13 @@ func (w *Producer) router() {
 		select {
 		case t := <-w.transactionChan:
 			w.transactions = append(w.transactions, t)
-			err := w.conn.WriteCommand(t.cmd)
+			err := w.conn.WriteCommand(t.cmd) //其实调用的是NewConn产生的Conn的WriteCommand方法
 			if err != nil {
 				w.log(LogLevelError, "(%s) sending command - %s", w.conn.String(), err)
 				w.close()
 			}
-		case data := <-w.responseChan:
+		case data := <-w.responseChan: //这货从哪来？从readLoop中的OnResponse函数而来。在上一个case中w.conn.WriteCommand发送消息，
+		//但是我们还需要在此处监听这个发出的消息是否被正确消费，所以此处需要根据OnResponse的结果来决定是否pop这个Transaction。
 			w.popTransaction(FrameTypeResponse, data)
 		case data := <-w.errorChan:
 			w.popTransaction(FrameTypeError, data)
@@ -335,7 +336,7 @@ exit:
 func (w *Producer) popTransaction(frameType int32, data []byte) {
 	t := w.transactions[0]
 	w.transactions = w.transactions[1:]
-	if frameType == FrameTypeError {
+	if frameType == FrameTypeError { //如果nsqd对消息的回应是FrameTypeError，就将此错误记录在t.Error传出去。
 		t.Error = ErrProtocol{string(data)}
 	}
 	t.finish()

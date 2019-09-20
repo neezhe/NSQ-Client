@@ -95,7 +95,7 @@ func NewConn(addr string, config *Config, delegate ConnDelegate) *Conn {
 		addr: addr, //服务器地址
 
 		config:   config,   //基本的服务端配置
-		delegate: delegate, //producer 与 consumer 用来处理消息回调的接口
+		delegate: delegate, //producer 与 consumer 用来处理消息回调的接口，ConnDelegate接口，所以Conn-->ConnDelegate--->consumer/producer
 
 		maxRdyCount:      2500, //每个连接这个值都是写死的。
 		lastMsgTimestamp: time.Now().UnixNano(), //上一条消息抵达的时间
@@ -182,7 +182,7 @@ func (c *Conn) Connect() (*IdentifyResponse, error) {
 	atomic.StoreInt32(&c.readLoopRunning, 1) //纯粹的只是用来表示有readLoop在运行
 	//以下与服务端进行通信，两个无限循环的协程。
 	go c.readLoop()//此处读到nsqd发过来的消息并处理之后，下面writeLoop可能需要针对这个消息向nsqd返回指令，指令可以是 REQ，TOUCH，FIN。
-	go c.writeLoop()
+	go c.writeLoop() //写什么？
 	return resp, nil
 }
 
@@ -482,7 +482,7 @@ func (c *Conn) auth(secret string) error {
 
 	return nil
 }
-
+//生产者和消费者公用，此函数，其中处理FrameTypeMessage类型的消息是消费者独有
 func (c *Conn) readLoop() {
 	delegate := &connMessageDelegate{c} //是Conn的代理
 	for {
@@ -490,7 +490,7 @@ func (c *Conn) readLoop() {
 			goto exit
 		}
 
-		frameType, data, err := ReadUnpackedResponse(c) //阻塞着从Conn读服务器发功来的数据
+		frameType, data, err := ReadUnpackedResponse(c) //阻塞着从Conn读服务器发功来的数据,读什么？
 		if err != nil {
 			if err == io.EOF && atomic.LoadInt32(&c.closeFlag) == 1 { //服务端发送FIN时才会read到EOF
 				goto exit
@@ -504,7 +504,7 @@ func (c *Conn) readLoop() {
 
 		if frameType == FrameTypeResponse && bytes.Equal(data, []byte("_heartbeat_")) { //如果读到的是心跳
 			c.log(LogLevelDebug, "heartbeat received")
-			c.delegate.OnHeartbeat(c)    //不会做任何事
+			c.delegate.OnHeartbeat(c)    //不会做任何事，调的是consumer或者producer两个结构体的onConnHeartbeat方法，这个函数是空的。
 			err := c.WriteCommand(Nop()) //消息是 heartbeat会回复一条空指令告诉服务器自己的存活状态
 			if err != nil {
 				c.log(LogLevelError, "IO error - %s", err)
@@ -513,11 +513,10 @@ func (c *Conn) readLoop() {
 			}
 			continue //若读到的是心跳则重新读
 		}
-
 		switch frameType {
-		case FrameTypeResponse:
+		case FrameTypeResponse: //比如发送一个命令FIN,PUB等，有时在nsqd的IOLoop中会有一个返回信息，当然大部分命令是没有返回消息的
 			c.delegate.OnResponse(c, data) //若读到的FrameTypeResponse不是心跳而是CLOSE_WAIT命令，则关闭连接。对于FrameTypeResponse类型，除了心跳和CLOSE_WAIT，其他的不做处理。
-		case FrameTypeMessage:
+		case FrameTypeMessage: //关键是这货是什么时候发的？也是在nsqd的IOLoop中messagePump中的sendMessage，这个是consumer的客户端才会读到此类消息。
 			msg, err := DecodeMessage(data)
 			if err != nil {
 				c.log(LogLevelError, "IO error - %s", err)
@@ -569,7 +568,7 @@ func (c *Conn) writeLoop() {
 			// Indicate drainReady because we will not pull any more off msgResponseChan
 			close(c.drainReady)
 			goto exit
-		case cmd := <-c.cmdChan: //cmdChan只是来自于touch，TOUCH告诉服务端需要更多的时间处理这条消息。
+		case cmd := <-c.cmdChan: //cmdChan只是来自于touch，TOUCH告诉服务端需要更多的时间处理这条消息。但是貌似Touch()没有地方在调用
 			err := c.WriteCommand(cmd)
 			if err != nil {
 				c.log(LogLevelError, "error sending command %s - %s", cmd, err)
@@ -577,7 +576,7 @@ func (c *Conn) writeLoop() {
 				continue
 			}
 		case resp := <-c.msgResponseChan:
-			//这里为了消息处理更高效，使用了一个单独的 channel 发送 FIN 和 REQ 状态指令。
+			//这里为了消息处理更高效，使用了一个单独的 channel 发送 FIN 和 REQ 状态指令。当消息调用完毕，就要向msgResponseChan中压入FIN 和 REQ 状态指令，然后下面接下来就开始发送给nsqd。
 			// Decrement this here so it is correct even if we can't respond to nsqd
 			msgsInFlight := atomic.AddInt64(&c.messagesInFlight, -1) //回应一个消息，那么InFlight的消息就减1
 

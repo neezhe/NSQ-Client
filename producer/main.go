@@ -23,7 +23,7 @@ func main() {
 			buf[i] = chars[rand.Intn(len(chars))]
 		}
 		log.Printf("Pub: %s", buf)
-		err = w.Publish("lizhe", buf)
+		err = w.Publish("lizhe11", buf)
 		if err != nil {
 			log.Panic(err)
 		}

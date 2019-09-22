@@ -275,7 +275,7 @@ func (w *Producer) connect() error {
 
 	logger, logLvl := w.getLogger()
 	//第二个参数是producer的代理,是一个代理结构体,producerConnDelegate和consumerConnDelegate都是connDelegate类型，因为他们都实现了connDelegate接口。
-	w.conn = NewConn(w.addr, &w.config, &producerConnDelegate{w})
+	w.conn = NewConn(w.addr, &w.config, &producerConnDelegate{w}) //*Conn实现了producerConn接口，注意不是Conn，而是*Conn
 	w.conn.SetLogger(logger, logLvl, fmt.Sprintf("%3d (%%s)", w.id))
 	//w.conn实现了producerConn接口，所以w.conn也是producerConn类型.此处和consummer中的Connect的类型不一样，此处是一个接口，
 	_, err := w.conn.Connect() //同样的，发送v2协议，identify命令，可能发送AUTH命令,并开启一个readLoop和一个writeLoop

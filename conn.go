@@ -575,8 +575,8 @@ func (c *Conn) writeLoop() {
 				c.close()
 				continue
 			}
-		case resp := <-c.msgResponseChan:
-			//这里为了消息处理更高效，使用了一个单独的 channel 发送 FIN 和 REQ 状态指令。当消息调用完毕，就要向msgResponseChan中压入FIN 和 REQ 状态指令，然后下面接下来就开始发送给nsqd。
+		case resp := <-c.msgResponseChan: //onMessageRequeue和onMessageFin会往msgResponseChan传数据
+			//这里为了消息处理更高效，使用了一个单独的 channel 发送 FIN 和 REQ 状态指令。
 			// Decrement this here so it is correct even if we can't respond to nsqd
 			msgsInFlight := atomic.AddInt64(&c.messagesInFlight, -1) //回应一个消息，那么InFlight的消息就减1
 

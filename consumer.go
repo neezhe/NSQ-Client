@@ -119,7 +119,7 @@ type Consumer struct {
 	rdyRetryTimers map[string]*time.Timer
 
 	pendingConnections map[string]*Conn
-	connections        map[string]*Conn //“nsqd的ip:port”为key,value为连接套接字为Conn
+	connections        map[string]*Conn //“nsqd的ip:port”为key,value为连接套接字为Conn,意思就是说一个消费者可能和多个不同addr的nsqd建立了连接
 
 	nsqdTCPAddrs []string
 
@@ -258,10 +258,8 @@ func (r *Consumer) SetBehaviorDelegate(cb interface{}) {
 func (r *Consumer) perConnMaxInFlight() int64 {
 	b := float64(r.getMaxInFlight())
 	s := b / float64(len(r.conns())) //能处理消息的最大数量平均到每个连接上的数量，比如大小为3的MaxInFlight平均到2个连接上，每个上面就是1
-	//这里的len(r.conns())和b(配置文件设置的)至少为1，若b小于len(r.conns())，返回值为1
-	//所以返回值可能为：
 	//1.当MaxInFlight小于等于连接数时，返回值为1。其实等于的情况是可以刚刚分配合理。但是小于的情况下，有些连接是永远无法收到消息的，如何处理？
-	//2.当MaxInFlight大于连接数时，返回值为b / float64(len(r.conns())
+	//2.当MaxInFlight大于连接数时，返回值为b / float64(len(r.conns())，可为1可大于1
 	return int64(math.Min(math.Max(1, s), b))
 }
 
@@ -547,7 +545,7 @@ func (r *Consumer) ConnectToNSQD(addr string) error {
 	// 说明建立过连接了，直接返回，否则先添加到pendingConnections中，创建了一个匿名函数cleanupConnection，
 	// 当连接建立失败后进行清理工作，之后才正式建立连接。
 	r.mtx.Lock()
-	_, pendingOk := r.pendingConnections[addr]
+	_, pendingOk := r.pendingConnections[addr] //一个addr对应一个nsqd,那么此处表示一个消费者可能有多个nsqd
 	_, ok := r.connections[addr]
 	if ok || pendingOk {
 		r.mtx.Unlock()
@@ -901,7 +899,9 @@ func (r *Consumer) maybeUpdateRDY(conn *Conn) {
 			conn, inBackoff, inBackoffTimeout)
 		return
 	}
-	count := r.perConnMaxInFlight() //这里拿到的count值永远大于0
+	//下面拿到的是平均到每个连接的最大rdy值，当连接数大于maxinflight时，则有些连接的rdy可以设置为1，有些就不能设置了,因为都设为1超过了承受范围，这个工作就交给下面updateRDY去筛选。
+	//也就是说我此处先拿到每个连接可能下发的rdy值，但是有没有资格下发，就交给updateRDY去判断。
+	count := r.perConnMaxInFlight()
 
 	r.log(LogLevelDebug, "(%s) sending RDY %d", conn, count)
 	r.updateRDY(conn, count) //此时才开始调整这个消费者在单个连接conn上的RDY count
@@ -945,11 +945,10 @@ func (r *Consumer) updateRDY(c *Conn, count int64) error {
 	r.rdyRetryMtx.Unlock()
 
 	//所有连接上的RDY之和不能够超过max-in-flight，
-	//因此当前连接上能够设置的RDY的最大值就是max-in-flight减去当前消费者除此连接外所有连接的rdyCount之和，即maxPossibleRdy，使用此值来约束待更新的RDY的上限。
+	//因此当前连接上能够设置的RDY的最大值，就是max-in-flight减去当前消费者除此连接外所有连接的rdyCount之和，即maxPossibleRdy，使用此值来约束待更新的RDY的上限。
 	rdyCount := c.RDY()//当前连接的rdy数，可以理解为maxinflight分给当前连接的缓存大小，totalRdyCount就是这些缓存的总和。
-	//1.当MaxInFlight小于连接数时：如当maxInFlight为3，若连接数有4个，则每个连接分配到的rdyCount为1，totalRdyCount为4，此时maxInFlight小于totalRdyCount，注意对于这种情况，在rdyLoop协程中每隔5秒会调整一次。
-	//2.当MaxInFlight大于等于连接数时：如当maxInFlight为5，若连接数有4个，则每个连接分配到的rdyCount为1，totalRdyCount为4，此时maxInFlight大于totalRdyCount
-	//3.当MaxInFlight是连接数倍数时：如当maxInFlight为8，若连接数有4个，则每个连接分配到的rdyCount为2，totalRdyCount为8，此时maxInFlight等于totalRdyCount
+	//比如当maxinflight为1，连接数为2，当走到第一个连接中，maxPossibleRdy为1，count为1，此1可以sendRDY到nsqd，
+	//当循环到第二个连接，maxPossibleRdy就变成了0，count为1，此1就无法通过sendRDY发送到nsqd,因为直接return ErrOverMaxInFlight返回了，所以此连接暂时无法与nsqd通信，当然后rdyLoop中会进行调整。
 	//MaxInFlight在消费者创建的时候就配置好了的，totalRdyCount和rdyCount则是动态变化的
 	maxPossibleRdy := int64(r.getMaxInFlight()) - atomic.LoadInt64(&r.totalRdyCount) + rdyCount //减去totalRdyCount就是减去所有连接的rdyCount之和，加上rdyCount就是减去当前消费者除此连接外所有连接的rdyCount之和。
 	if maxPossibleRdy > 0 && maxPossibleRdy < count {//如果传进来的“这个连接的count值”比“这个连接上可能的最大RDY值”都大，一般不会出现这种情况，此处只是以防万一。
@@ -963,10 +962,10 @@ func (r *Consumer) updateRDY(c *Conn, count int64) error {
 			// in order to prevent eternal starvation we reschedule this attempt
 			// (if any other RDY update succeeds this timer will be stopped)
 			r.rdyRetryMtx.Lock()
-			//这里的key是这个链接的addr，这个定时器会阻塞吗？
+			//这里的key是这个链接的addr，这个定时器会阻塞吗？不会
 			r.rdyRetryTimers[c.String()] = time.AfterFunc(5*time.Second, //这个定时器在上面941行可能会被停止。
 				func() {
-					r.updateRDY(c, count)//递归,过5秒会执行，这个5秒钟的函数不是周期5秒的执行
+					r.updateRDY(c, count)//递归,过5秒会执行，这个5秒钟的函数不是周期5秒的执行，只一次。
 				})
 			r.rdyRetryMtx.Unlock()
 		}
@@ -1020,7 +1019,7 @@ func (r *Consumer) redistributeRDY() {
 	if !atomic.CompareAndSwapInt32(&r.needRDYRedistributed, 1, 0) {//若相等则交换，返回值代表是否交换
 		return
 	}
-	//若len(conns) > int(maxInFlight)的情况下继续往下走进行rdy的重新分配，不然上一步就return了
+	//若len(conns)>0且len(conns) > int(maxInFlight)的情况下，才继续往下走进行rdy的重新分配，不然上一步就return了
 	possibleConns := make([]*Conn, 0, len(conns))
 	for _, c := range conns {
 		lastMsgDuration := time.Now().Sub(c.LastMessageTime()) //LastMessageTime 是上一条消息处理前设定的时间，此处相减
@@ -1139,7 +1138,7 @@ func (r *Consumer) handlerLoop(handler Handler) { //这是个协程
 		}
 		fmt.Println("=======message=======",string(message.Body))
 		if r.shouldFailMessage(message, handler) {//shouldFailMessage只能判断处理重试次数过多的失败
-			message.Finish() //发送这个消息的FINISH命令
+			message.Finish() //发送这个消息的FINISH命令，触发writeLoop协程
 			continue
 		}
 
@@ -1147,7 +1146,7 @@ func (r *Consumer) handlerLoop(handler Handler) { //这是个协程
 		if err != nil {
 			r.log(LogLevelError, "Handler returned error (%s) for msg %s", err, message.ID)
 			if !message.IsAutoResponseDisabled() {
-				message.Requeue(-1)
+				message.Requeue(-1) //触发writeLoop协程
 			}
 			continue
 		}

@@ -50,9 +50,9 @@ type msgResponse struct {
 type Conn struct {
 	//全部是私有变量
 	// 64bit atomic vars need to be first for proper alignment on 32bit platforms
-	messagesInFlight int64 //来一个消息就加1，表示正在处理的消息数量
+	messagesInFlight int64 //来一个消息就加1，表示正在处理的消息数量，这个消息处理完后就会减1，此变量和rdyCount不一样，此变量是动态的。
 	maxRdyCount      int64 //当前connection可接收的消息数量的最大值（是配置的时候设的个固定值），每个连接这个值都是写死的。
-	rdyCount         int64 //用来标识当前connection 还可接收消息的容量，如果收到一个消息就对其减 1。这个值就是告知给nsqd的值。
+	rdyCount         int64 //用来标识当前connection 还可接收消息的容量，不会因为收到一个消息这个值就会减1，他表示的是设给nsqd的rdy容量，在nsqd中这个值也不会改变，在nsqd中这个值会约束InFlightCount不大于自身rdy容量。
 	lastRdyTimestamp int64
 	lastMsgTimestamp int64
 

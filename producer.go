@@ -247,7 +247,7 @@ func (w *Producer) sendCommandAsync(cmd *Command, doneChan chan *ProducerTransac
 	}
 
 	select {
-	case w.transactionChan <- t:
+	case w.transactionChan <- t: //解除router()的阻塞
 	case <-w.exitChan:
 		return ErrStopped
 	}
@@ -339,7 +339,7 @@ func (w *Producer) popTransaction(frameType int32, data []byte) {
 	if frameType == FrameTypeError { //如果nsqd对消息的回应是FrameTypeError，就将此错误记录在t.Error传出去。
 		t.Error = ErrProtocol{string(data)}
 	}
-	t.finish()
+	t.finish() //填充doneChan
 }
 
 func (w *Producer) transactionCleanup() {

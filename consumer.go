@@ -168,7 +168,7 @@ func NewConsumer(topic string, channel string, config *Config) (*Consumer, error
 
 		logger:      log.New(os.Stderr, "", log.Flags()),
 		logLvl:      LogLevelInfo,
-		maxInFlight: 3, //int32(config.MaxInFlight), //此值在后续不会发生变化，若此值设置成1(config中此处默认设置的是1)，就不会启用缓冲区，但是这样就需要前一条消息ACK后才处理下一条，所以不可取。(这个值其实可以理解成客户端装那些待处理消息的一块缓冲区的大小)
+		maxInFlight: int32(config.MaxInFlight), //此值在后续不会发生变化，若此值设置成1(config中此处默认设置的是1)，就不会启用缓冲区，但是这样就需要前一条消息ACK后才处理下一条，所以不可取。(这个值其实可以理解成客户端装那些待处理消息的一块缓冲区的大小)
 
 		incomingMessages: make(chan *Message),
 
@@ -1158,7 +1158,7 @@ func (r *Consumer) handlerLoop(handler Handler) { //这是个协程
 		}
 
 		if !message.IsAutoResponseDisabled() { //这个消息是否需要自动回复，这个字段在消息里面。
-			message.Finish() //完成一条消息
+			message.Finish() //完成一条消息，触发writeLoop协程
 		}
 	}
 

@@ -516,7 +516,7 @@ func (c *Conn) readLoop() {
 		switch frameType {
 		case FrameTypeResponse: //比如发送一个命令FIN,PUB等，有时在nsqd的IOLoop中会有一个返回信息，当然大部分命令是没有返回消息的
 			c.delegate.OnResponse(c, data) //若读到的FrameTypeResponse不是心跳而是CLOSE_WAIT命令，则关闭连接。对于FrameTypeResponse类型，除了心跳和CLOSE_WAIT，其他的不做处理。
-		case FrameTypeMessage: //关键是这货是什么时候发的？也是在nsqd的IOLoop中messagePump中的sendMessage，这个是consumer的客户端才会读到此类消息。
+		case FrameTypeMessage: //consumer的客户端才会读到此类型消息（生产者是不可以的）。关键是这货是什么时候发的？也是在nsqd的IOLoop中messagePump中的sendMessage，这个是consumer的客户端才会读到此类消息。
 			msg, err := DecodeMessage(data)
 			if err != nil {
 				c.log(LogLevelError, "IO error - %s", err)
